@@ -15,9 +15,9 @@ const navItems = [
     { id: "B4", label: "revalidatePath", href: "/tests/legacy/revalidate-path" },
   ]},
   { label: "C. Cross-cutting", items: [
-    { id: "C1", label: "Prewarm", href: "/tests/cross/prewarm" },
-    { id: "C2", label: "Cleanup", href: "/tests/cross/cleanup" },
-    { id: "C3", label: "Reconnect", href: "/tests/cross/reconnect" },
+    { id: "C1", label: "Prewarm", href: "/tests/cross/prewarm", redis: true },
+    { id: "C2", label: "Cleanup", href: "/tests/cross/cleanup", redis: true },
+    { id: "C3", label: "Reconnect", href: "/tests/cross/reconnect", redis: true },
     { id: "C4", label: "Concurrent", href: "/tests/cross/concurrent" },
     { id: "C5", label: "TTL Expiry", href: "/tests/cross/ttl-expiry" },
   ]},
@@ -49,14 +49,19 @@ export default function TestsLayout({ children }: { children: React.ReactNode })
                 key={item.id}
                 href={item.href}
                 style={{
-                  display: "block",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 4,
                   padding: "3px 8px",
                   color: "#0070f3",
                   textDecoration: "none",
                   borderRadius: 4,
                 }}
               >
-                {item.id} {item.label}
+                <span>{item.id} {item.label}</span>
+                {"redis" in item && (item as { redis?: boolean }).redis && (
+                  <span style={{ fontSize: "0.6rem", color: "#f59e0b", background: "#fffbeb", padding: "0 3px", borderRadius: 2, border: "1px solid #fde68a", lineHeight: "1.4" }}>R</span>
+                )}
               </a>
             ))}
           </div>

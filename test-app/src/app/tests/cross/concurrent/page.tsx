@@ -13,10 +13,10 @@ export default function ConcurrentPage() {
       <div style={{ padding: "1rem", background: "#f0f8ff", borderRadius: 8, fontSize: "0.9rem", marginTop: "1rem" }}>
         <strong>Verification:</strong>
         <ol style={{ margin: "0.5rem 0 0", paddingLeft: "1.5rem" }}>
-          <li>Click &quot;Flush Redis keys&quot; then &quot;Send 5 concurrent requests&quot;</li>
-          <li>Check in the logs below that only 1 set occurred for the same key</li>
+          <li>Click &quot;Send 5 concurrent requests&quot;</li>
+          <li>Check the Cached Data panel — only 1 set should occur for the same key</li>
           <li>Remaining requests are resolved via pendingSets as get operations</li>
-          <li>All responses should return the same cached value</li>
+          <li>All 5 responses should return 200 with the same cached value</li>
         </ol>
       </div>
     </div>

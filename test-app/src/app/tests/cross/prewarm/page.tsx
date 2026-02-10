@@ -1,11 +1,13 @@
 import { Suspense } from "react";
-import { createClient } from "@redis/client";
+
+const hasRedis = !!process.env.REDIS_URL;
 
 async function getPrewarmStatus() {
+  if (!hasRedis) return null;
+
+  const { createClient } = await import("@redis/client");
   const buildId = process.env.BUILD_ID || "test-default";
-  const client = createClient({
-    url: process.env.REDIS_URL,
-  });
+  const client = createClient({ url: process.env.REDIS_URL });
   client.on("error", () => {});
 
   try {
@@ -21,7 +23,13 @@ async function getPrewarmStatus() {
 
     await client.quit();
 
-    const cacheKeys = keys.filter((k) => !k.includes("_tags") && !k.includes("_tagTtls") && !k.includes("_useCache:") && !k.includes("__revalidated"));
+    const cacheKeys = keys.filter(
+      (k) =>
+        !k.includes("_tags") &&
+        !k.includes("_tagTtls") &&
+        !k.includes("_useCache:") &&
+        !k.includes("__revalidated")
+    );
     return {
       buildId,
       totalKeys: keys.length,
@@ -29,7 +37,9 @@ async function getPrewarmStatus() {
       connected: true,
     };
   } catch (err) {
-    try { await client.quit(); } catch {}
+    try {
+      await client.quit();
+    } catch {}
     return {
       buildId,
       totalKeys: 0,
@@ -42,6 +52,29 @@ async function getPrewarmStatus() {
 
 async function PrewarmStatus() {
   const status = await getPrewarmStatus();
+
+  if (!status) {
+    return (
+      <div
+        style={{
+          padding: "1rem",
+          background: "#fffbeb",
+          border: "1px solid #fde68a",
+          borderRadius: 8,
+          marginBottom: "1rem",
+        }}
+      >
+        <p style={{ margin: 0, fontWeight: "bold", color: "#92400e" }}>
+          Redis not connected
+        </p>
+        <p style={{ margin: "0.5rem 0 0", color: "#78716c", fontSize: "0.9rem" }}>
+          This test requires a Redis connection to verify that{" "}
+          <code>registerInitialCache</code> pre-loaded build artifacts.
+          Set <code>REDIS_URL</code> in your environment to enable this test.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <>

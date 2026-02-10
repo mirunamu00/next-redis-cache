@@ -46,6 +46,8 @@ async function ReconnectContent() {
 }
 
 export default function ReconnectPage() {
+  const hasRedis = !!process.env.REDIS_URL;
+
   return (
     <div>
       <h1>C3. Reconnection Recovery</h1>
@@ -53,18 +55,33 @@ export default function ReconnectPage() {
         Manually tests whether the cache operates normally after a Redis connection is lost and restored.
       </p>
 
+      {!hasRedis && (
+        <div style={{
+          padding: "1rem",
+          background: "#fffbeb",
+          border: "1px solid #fde68a",
+          borderRadius: 8,
+          marginBottom: "1rem",
+        }}>
+          <p style={{ margin: 0, fontWeight: "bold", color: "#92400e" }}>Redis not connected</p>
+          <p style={{ margin: "0.5rem 0 0", color: "#78716c", fontSize: "0.9rem" }}>
+            This test requires a Redis connection to observe disconnect/reconnect behavior.
+            Without Redis, the page renders normally using in-memory cache.
+          </p>
+        </div>
+      )}
+
       <Suspense fallback={<p style={{ color: "#888" }}>Loading cache data...</p>}>
         <ReconnectContent />
       </Suspense>
 
       <div style={{ padding: "1rem", background: "#f0f8ff", borderRadius: 8, fontSize: "0.9rem" }}>
-        <strong>Test Steps:</strong>
+        <strong>Test Steps (requires Redis):</strong>
         <ol style={{ margin: "0.5rem 0 0", paddingLeft: "1.5rem" }}>
           <li>Verify this page loads normally (status above: OK)</li>
-          <li>Disconnect Redis port-forward (Ctrl+C in terminal)</li>
-          <li>Refresh this page → check for error or cache behavior</li>
-          <li>Check error logs in the logs below</li>
-          <li>Reconnect Redis port-forward</li>
+          <li>Disconnect Redis (stop the server or kill port-forward)</li>
+          <li>Refresh this page → check for error or fallback behavior</li>
+          <li>Reconnect Redis</li>
           <li>Refresh this page → verify normal operation restored</li>
         </ol>
       </div>
@@ -72,7 +89,7 @@ export default function ReconnectPage() {
       <div style={{ padding: "1rem", background: "#fff8f0", borderRadius: 8, fontSize: "0.9rem", marginTop: "1rem" }}>
         <strong>Checkpoints:</strong>
         <ul style={{ margin: "0.5rem 0 0", paddingLeft: "1.5rem" }}>
-          <li>When Redis is disconnected: check if Next.js renders the page with a fallback</li>
+          <li>When Redis is disconnected: Next.js renders without cache (graceful degradation)</li>
           <li>After reconnection: @redis/client auto-reconnects → cache operates normally</li>
           <li>Verify recovery after &quot;Connection timeout&quot; logs in the console</li>
         </ul>

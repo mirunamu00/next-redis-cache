@@ -32,13 +32,18 @@
     "build": "tsup",
     "dev": "tsup --watch",
     "typecheck": "tsc --noEmit",
+    "changeset": "changeset",
+    "version": "changeset version",
+    "release": "npm run build && changeset publish",
     "prepublishOnly": "npm run build"
   },
   "peerDependencies": {
-    "next": ">=15.0.0",
-    "@redis/client": ">=5.0.0"
+    "@redis/client": ">=5.0.0",
+    "next": ">=15.0.0"
   },
   "devDependencies": {
+    "@changesets/changelog-github": "^0.5.2",
+    "@changesets/cli": "^2.29.8",
     "@redis/client": "^5.10.0",
     "@types/node": "^22.0.0",
     "next": "^16.1.4",

@@ -382,21 +382,46 @@ The repository includes a full test application with 14 interactive test scenari
 
 [Live Demo](https://example.com) <!-- TODO: replace with real URL -->
 
+### Two Operating Modes
+
+The demo app runs in two modes depending on whether `REDIS_URL` is set:
+
+| Mode | Condition | Behavior |
+|------|-----------|----------|
+| **In-memory visualization** | No `REDIS_URL` | Cache data is captured in-memory on every `set()` call. The **Cache Viewer** panel shows the exact data structure, tags, TTL, and serialized payload that *would* be stored in Redis. No actual caching occurs — every page visit generates fresh data. |
+| **Full Redis caching** | `REDIS_URL` set | Data is stored in and served from Redis. All test scenarios are fully functional, including build prewarming, old-key cleanup, and reconnection recovery. |
+
+The in-memory mode is designed for the public demo site, where visitors can explore each test scenario and see exactly what data flows through the cache handlers without requiring a Redis instance.
+
 ### Run Locally
 
 ```bash
 cd test-app
-cp .env.example .env   # Set REDIS_URL (optional — works without Redis too)
 npm install
-npm run build
-npm run start
+
+# Option A: In-memory visualization (no Redis needed)
+npm run build && npm run start
+
+# Option B: Full Redis caching
+REDIS_URL=redis://localhost:6379 npm run build && npm run start
 ```
+
+### Bringing the Handler Files to Your Own Project
+
+To use the cache handlers in your own Next.js app, copy the following files from `test-app/` and adjust the configuration:
+
+1. **`cache-handler.mjs`** — Legacy handler setup (modify `keyPrefix`, `sharedTagsKey`, etc.)
+2. **`use-cache-handler.mjs`** — `"use cache"` handler setup (modify `useCacheKeyPrefix`, etc.)
+3. **`next.config.ts`** — Add `cacheHandler`, `cacheHandlers`, and `cacheMaxMemorySize: 0`
+4. **`src/instrumentation.ts`** — Optional: add `registerInitialCache()` and `cleanupOldBuildKeys()`
+
+Replace the `test:${buildId}:` prefix pattern with your own app prefix. Remove the `storeCacheEntry()` calls (those are demo-only for the Cache Viewer).
 
 ### Test Scenarios
 
 | Category | Test | What it verifies |
 |----------|------|------------------|
-| **Legacy (ISR)** | Basic Fetch | `fetch()` with `revalidate` is cached and served from Redis |
+| **Legacy (ISR)** | Basic Fetch | `fetch()` with `revalidate` is cached and served |
 | | Fetch Tags | `fetch()` with `tags` option, tag-based invalidation |
 | | Multi Tags | Multiple tags on a single entry, selective invalidation |
 | | Revalidate Path | `revalidatePath()` invalidates by route path |
@@ -407,11 +432,13 @@ npm run start
 | | Nested | Nested `"use cache"` calls |
 | **Cross-cutting** | TTL Expiry | Cache entries expire after TTL elapses |
 | | Concurrent | Parallel requests don't cause duplicate writes |
-| | Prewarm | `registerInitialCache()` populates Redis on startup |
-| | Cleanup | `cleanupOldBuildKeys()` removes old build keys |
-| | Reconnect | Graceful degradation on Redis connection loss |
+| | Prewarm * | `registerInitialCache()` populates Redis on startup |
+| | Cleanup * | `cleanupOldBuildKeys()` removes old build keys |
+| | Reconnect * | Graceful degradation on Redis connection loss |
 
-The test app includes a **Cache Viewer** panel that displays all cached entries in real-time, showing handler type, cache key, size, tags, and TTL.
+\* *Requires `REDIS_URL` — these tests show a notice when Redis is not available.*
+
+The test app includes a **Cache Viewer** panel at the bottom of every test page. It displays all cached entries in real-time, showing handler type (`legacy` / `use-cache`), cache key, serialized size, tags, and TTL.
 
 ## Compatibility
 

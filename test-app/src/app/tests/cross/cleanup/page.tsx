@@ -1,11 +1,13 @@
 import { Suspense } from "react";
-import { createClient } from "@redis/client";
+
+const hasRedis = !!process.env.REDIS_URL;
 
 async function getKeyPrefixes() {
+  if (!hasRedis) return null;
+
+  const { createClient } = await import("@redis/client");
   const buildId = process.env.BUILD_ID || "test-default";
-  const client = createClient({
-    url: process.env.REDIS_URL,
-  });
+  const client = createClient({ url: process.env.REDIS_URL });
   client.on("error", () => {});
 
   try {
@@ -37,7 +39,9 @@ async function getKeyPrefixes() {
       connected: true,
     };
   } catch (err) {
-    try { await client.quit(); } catch {}
+    try {
+      await client.quit();
+    } catch {}
     return {
       buildId,
       currentPrefix: `test:${buildId}:`,
@@ -51,6 +55,29 @@ async function getKeyPrefixes() {
 
 async function CleanupStatus() {
   const data = await getKeyPrefixes();
+
+  if (!data) {
+    return (
+      <div
+        style={{
+          padding: "1rem",
+          background: "#fffbeb",
+          border: "1px solid #fde68a",
+          borderRadius: 8,
+          marginBottom: "1rem",
+        }}
+      >
+        <p style={{ margin: 0, fontWeight: "bold", color: "#92400e" }}>
+          Redis not connected
+        </p>
+        <p style={{ margin: "0.5rem 0 0", color: "#78716c", fontSize: "0.9rem" }}>
+          This test requires a Redis connection to verify that{" "}
+          <code>cleanupOldBuildKeys</code> removed previous build keys.
+          Set <code>REDIS_URL</code> in your environment to enable this test.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <>

@@ -1,0 +1,5 @@
+node_modules/
+dist/
+*.tsbuildinfo
+test-app/.next/
+test-app/cache-debug.log

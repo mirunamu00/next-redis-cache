@@ -1,0 +1,50 @@
+{
+  "name": "@mirunamu/next-redis-cache",
+  "version": "0.1.0",
+  "description": "Redis cache handler for Next.js 16 — supports both legacy cacheHandler (ISR) and use-cache cacheHandlers",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "require": "./dist/index.cjs"
+    },
+    "./use-cache": {
+      "types": "./dist/use-cache.d.ts",
+      "import": "./dist/use-cache.js",
+      "require": "./dist/use-cache.cjs"
+    },
+    "./instrumentation": {
+      "types": "./dist/instrumentation.d.ts",
+      "import": "./dist/instrumentation.js",
+      "require": "./dist/instrumentation.cjs"
+    }
+  },
+  "main": "./dist/index.cjs",
+  "module": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsup",
+    "dev": "tsup --watch",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build"
+  },
+  "peerDependencies": {
+    "next": ">=15.0.0",
+    "@redis/client": ">=5.0.0"
+  },
+  "devDependencies": {
+    "@redis/client": "^5.10.0",
+    "@types/node": "^22.0.0",
+    "next": "^16.1.4",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.9.0"
+  }
+}

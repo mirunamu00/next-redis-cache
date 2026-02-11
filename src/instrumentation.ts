@@ -161,7 +161,7 @@ async function readMeta(metaPath: string): Promise<MetaFile | null> {
  *
  * Usage in consumer's instrumentation.ts:
  * ```ts
- * const { registerInitialCache } = await import("@mirunamu/cache-handler/instrumentation");
+ * const { registerInitialCache } = await import("@mirunamu/next-redis-cache/instrumentation");
  * const CacheHandler = (await import("./cache-handler.mjs")).default;
  * await registerInitialCache(CacheHandler, { setOnlyIfNotExists: true });
  * ```
@@ -169,7 +169,11 @@ async function readMeta(metaPath: string): Promise<MetaFile | null> {
 export async function registerInitialCache(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   CacheHandlerClass: new (context: any) => {
-    set(key: string, data: unknown, ctx: Record<string, unknown>): Promise<void>;
+    set(
+      key: string,
+      data: unknown,
+      ctx: Record<string, unknown>
+    ): Promise<void>;
   },
   options: RegisterInitialCacheOptions = {}
 ): Promise<{ prewarmed: number }> {
@@ -227,7 +231,7 @@ export async function registerInitialCache(
  *
  * Usage in consumer's instrumentation.ts:
  * ```ts
- * const { cleanupOldBuildKeys } = await import("@mirunamu/cache-handler/instrumentation");
+ * const { cleanupOldBuildKeys } = await import("@mirunamu/next-redis-cache/instrumentation");
  * await cleanupOldBuildKeys({
  *   redisUrl: process.env.REDIS_URL,
  *   patterns: [
@@ -251,7 +255,10 @@ export async function cleanupOldBuildKeys(
     const allOldKeys: string[] = [];
 
     for (const { scan, keepExact, keepPrefix } of patterns) {
-      for await (const key of client.scanIterator({ MATCH: scan, COUNT: 200 })) {
+      for await (const key of client.scanIterator({
+        MATCH: scan,
+        COUNT: 200,
+      })) {
         const k = String(key);
         if (keepExact && k === keepExact) continue;
         if (keepPrefix && k.startsWith(keepPrefix)) continue;

@@ -1,4 +1,4 @@
-import { LegacyCacheHandler } from "@mirunamu/cache-handler";
+import { LegacyCacheHandler } from "@mirunamu/next-redis-cache";
 import { storeCacheEntry } from "./logger.mjs";
 
 const buildId = process.env.BUILD_ID || "test-default";

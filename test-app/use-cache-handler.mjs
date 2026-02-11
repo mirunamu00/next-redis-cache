@@ -11,7 +11,10 @@ const noopHandler = {
   updateTags: () => Promise.resolve(),
 };
 
-if (process.env.NEXT_PHASE === "phase-production-build" || !process.env.REDIS_URL) {
+if (
+  process.env.NEXT_PHASE === "phase-production-build" ||
+  !process.env.REDIS_URL
+) {
   // Build time or no Redis → noop, but still capture set data for viewer
   handler = {
     ...noopHandler,
@@ -22,7 +25,9 @@ if (process.env.NEXT_PHASE === "phase-production-build" || !process.env.REDIS_UR
     },
   };
 } else {
-  const { createUseCacheHandler } = await import("@mirunamu/cache-handler/use-cache");
+  const { createUseCacheHandler } = await import(
+    "@mirunamu/next-redis-cache/use-cache"
+  );
   const { createClient } = await import("@redis/client");
 
   const client = createClient({

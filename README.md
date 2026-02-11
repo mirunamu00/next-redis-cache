@@ -423,19 +423,7 @@ myapp:abc:_revalidated          → { "product": "1707592000" }
 
 Since all keys share the `myapp:abc:` prefix, a single cleanup pattern `{ scan: "myapp:*", keepPrefix: "myapp:abc:" }` removes all keys from previous builds.
 
-## Example App
-
-The repository includes a full test application with interactive test scenarios.
-
-### Run Locally
-
-```bash
-cd test-app
-npm install
-REDIS_URL=redis://localhost:6379 npm run build && npm run start
-```
-
-### Bringing the Handler Files to Your Own Project
+## Getting Started
 
 To use the cache handlers in your own Next.js app, create the following files based on the [Quick Start](#quick-start) examples:
 
@@ -445,27 +433,6 @@ To use the cache handlers in your own Next.js app, create the following files ba
 4. **`src/instrumentation.ts`** — Optional: add `cleanupOldBuildKeys()` and `registerInitialCache()`
 
 Replace `myapp` with your own app prefix (e.g., `docs`, `blog`). Ensure both handlers share the same `sharedTagsKey`, `sharedTagsTtlKey`, and `revalidatedTagsKey` values.
-
-### Test Scenarios
-
-| Category          | Test            | What it verifies                                        |
-| ----------------- | --------------- | ------------------------------------------------------- |
-| **Legacy (ISR)**  | Basic Fetch     | `fetch()` with `revalidate` is cached and served        |
-|                   | Fetch Tags      | `fetch()` with `tags` option, tag-based invalidation    |
-|                   | Multi Tags      | Multiple tags on a single entry, selective invalidation |
-|                   | Revalidate Path | `revalidatePath()` invalidates by route path            |
-| **use cache**     | Basic           | `"use cache"` function result is cached                 |
-|                   | Cache Life      | `cacheLife()` profiles control TTL                      |
-|                   | Cache Tag       | `cacheTag()` + `revalidateTag()` invalidation           |
-|                   | Component       | Cached React Server Component                           |
-|                   | Nested          | Nested `"use cache"` calls                              |
-| **Cross-cutting** | TTL Expiry      | Cache entries expire after TTL elapses                  |
-|                   | Concurrent      | Parallel requests don't cause duplicate writes          |
-|                   | Prewarm \*      | `registerInitialCache()` populates Redis on startup     |
-|                   | Cleanup \*      | `cleanupOldBuildKeys()` removes old build keys          |
-|                   | Reconnect \*    | Graceful degradation on Redis connection loss           |
-
-\* _Requires `REDIS_URL`_
 
 ## Compatibility
 

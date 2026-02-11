@@ -1,5 +1,11 @@
 # @mirunamu/next-redis-cache
 
+## 1.0.6
+
+### Patch Changes
+
+- [`c66b4db`](https://github.com/mirunamu00/next-redis-cache/commit/c66b4dbb7b21860d7362df08986906a159a49475) Thanks [@geonwooo-park](https://github.com/geonwooo-park)! - fix: scanIterator yields key arrays in @redis/client v5, iterate inner keys correctly
+
 ## 1.0.5
 
 ### Patch Changes

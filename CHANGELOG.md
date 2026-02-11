@@ -1,5 +1,11 @@
 # @mirunamu/next-redis-cache
 
+## 1.0.4
+
+### Patch Changes
+
+- [`d65279e`](https://github.com/mirunamu00/next-redis-cache/commit/d65279e6e63d2b651237a035703d602ed91b6da9) Thanks [@geonwooo-park](https://github.com/geonwooo-park)! - update README.md
+
 ## 1.0.3
 
 ### Patch Changes

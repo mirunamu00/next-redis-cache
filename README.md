@@ -40,25 +40,30 @@ Create `cache-handler.mjs` at your project root:
 
 ```js
 import { LegacyCacheHandler } from "@mirunamu/next-redis-cache";
-import { createClient } from "@redis/client";
+import { PHASE_PRODUCTION_BUILD } from "next/constants.js";
 
 const buildId = process.env.BUILD_ID || "default";
 
-LegacyCacheHandler.onCreation(async () => {
-  if (process.env.NEXT_PHASE === "phase-production-build") {
+LegacyCacheHandler.onCreation(async (context) => {
+  if (context.serverOptions?.phase === PHASE_PRODUCTION_BUILD) {
     return null; // skip Redis during build
   }
 
+  if (!process.env.REDIS_URL) {
+    return null; // no Redis URL → graceful fallback
+  }
+
+  const { createClient } = await import("@redis/client");
   const client = createClient({ url: process.env.REDIS_URL });
-  client.on("error", (err) => console.error("[redis]", err.message));
+  client.on("error", (err) => console.error("[Redis]", err.message));
   await client.connect();
 
   return {
     client,
     keyPrefix: `myapp:${buildId}:`,
-    sharedTagsKey: `myapp:${buildId}:_tags`,
-    sharedTagsTtlKey: `myapp:${buildId}:_tagTtls`,
-    revalidatedTagsKey: "__revalidated_tags__",
+    sharedTagsKey: `_tags`,
+    sharedTagsTtlKey: `_tagTtls`,
+    revalidatedTagsKey: `_revalidated`,
   };
 });
 
@@ -70,25 +75,46 @@ export default LegacyCacheHandler;
 Create `use-cache-handler.mjs` at your project root:
 
 ```js
-import { createUseCacheHandler } from "@mirunamu/next-redis-cache/use-cache";
-import { createClient } from "@redis/client";
-
 const buildId = process.env.BUILD_ID || "default";
+let handler;
 
-const client = createClient({ url: process.env.REDIS_URL });
-client.on("error", (err) => console.error("[redis]", err.message));
-await client.connect();
+if (
+  process.env.NEXT_PHASE === "phase-production-build" ||
+  !process.env.REDIS_URL
+) {
+  // Build time or no Redis → noop handler
+  handler = {
+    get: () => Promise.resolve(undefined),
+    set: () => Promise.resolve(),
+    refreshTags: () => Promise.resolve(),
+    getExpiration: () => Promise.resolve(0),
+    updateTags: () => Promise.resolve(),
+  };
+} else {
+  const { createUseCacheHandler } = await import(
+    "@mirunamu/next-redis-cache/use-cache"
+  );
+  const { createClient } = await import("@redis/client");
 
-const handler = createUseCacheHandler({
-  client,
-  keyPrefix: `myapp:${buildId}:`,
-  useCacheKeyPrefix: `myapp:${buildId}:_useCache:`,
-  revalidatedTagsKey: "__revalidated_tags__",
-  timeoutMs: 5000,
-});
+  const client = createClient({ url: process.env.REDIS_URL });
+  client.on("error", (err) => console.error("[Redis]", err.message));
+  await client.connect();
+
+  handler = createUseCacheHandler({
+    client,
+    keyPrefix: `myapp:${buildId}:`,
+    useCacheKeyPrefix: `myapp:${buildId}:uc:`,
+    sharedTagsKey: `_tags`,
+    sharedTagsTtlKey: `_tagTtls`,
+    revalidatedTagsKey: `_revalidated`,
+    timeoutMs: 5000,
+  });
+}
 
 export default handler;
 ```
+
+> **Important:** Both handlers must use the **same `sharedTagsKey`, `sharedTagsTtlKey`, and `revalidatedTagsKey`** values so that `revalidateTag()` from the legacy handler also invalidates `"use cache"` entries and vice versa.
 
 ### Step 3 — Next.js Configuration
 
@@ -102,6 +128,7 @@ const nextConfig: NextConfig = {
     default: require.resolve("./use-cache-handler.mjs"),
   },
   cacheMaxMemorySize: 0, // disable in-memory cache, use Redis only
+  generateBuildId: async () => process.env.BUILD_ID || "default",
 };
 
 export default nextConfig;
@@ -114,22 +141,24 @@ Create `src/instrumentation.ts` to enable build prewarming and old-key cleanup:
 ```ts
 export async function register() {
   if (process.env.NEXT_RUNTIME === "nodejs") {
-    const CacheHandler = (await import("../cache-handler.mjs")).default;
-    const { registerInitialCache, cleanupOldBuildKeys } = await import(
+    const buildId = process.env.BUILD_ID || "default";
+
+    const { cleanupOldBuildKeys, registerInitialCache } = await import(
       "@mirunamu/next-redis-cache/instrumentation"
     );
 
-    const buildId = process.env.BUILD_ID || "default";
-
     // Remove keys from previous builds
-    await cleanupOldBuildKeys({
-      redisUrl: process.env.REDIS_URL!,
-      patterns: [
-        { scan: "myapp:*", keepPrefix: `myapp:${buildId}:` },
-      ],
-    });
+    if (process.env.REDIS_URL) {
+      await cleanupOldBuildKeys({
+        redisUrl: process.env.REDIS_URL,
+        patterns: [
+          { scan: "myapp:*", keepPrefix: `myapp:${buildId}:` },
+        ],
+      });
+    }
 
     // Push static build output into Redis
+    const CacheHandler = (await import("../cache-handler.mjs")).default;
     await registerInitialCache(CacheHandler, { setOnlyIfNotExists: true });
   }
 }
@@ -144,24 +173,26 @@ Returned from the `onCreation` hook:
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `client` | `RedisClientType` | **required** | Connected `@redis/client` instance |
-| `keyPrefix` | `string` | `""` | Prefix for all cache keys in Redis |
-| `sharedTagsKey` | `string` | `"__sharedTags__"` | Redis Hash key for tag-to-cache-key mapping |
-| `sharedTagsTtlKey` | `string` | `"__sharedTagsTtl__"` | Redis Hash key for cache key expiration tracking |
-| `revalidatedTagsKey` | `string` | `"__revalidated_tags__"` | Redis Hash key for tag revalidation timestamps |
+| `keyPrefix` | `string` | `""` | Prefix prepended to all Redis keys (cache data, tags, TTLs) |
+| `sharedTagsKey` | `string` | `"__sharedTags__"` | Suffix for the tag-to-cache-key mapping Hash |
+| `sharedTagsTtlKey` | `string` | `"__sharedTagsTtl__"` | Suffix for the cache key expiration tracking Hash |
+| `revalidatedTagsKey` | `string` | `"__revalidated_tags__"` | Suffix for the tag revalidation timestamps Hash |
 | `timeoutMs` | `number` | `5000` | Timeout (ms) for each Redis operation |
 | `defaultStaleAge` | `number` | `31536000` (1 year) | Default stale age (seconds) when `revalidate` is not set |
 | `estimateExpireAge` | `(staleAge: number) => number` | `s => Math.floor(s * 1.5)` | Calculates the hard expiration age from the stale age |
+
+> **Key composition:** `sharedTagsKey`, `sharedTagsTtlKey`, and `revalidatedTagsKey` are automatically prefixed with `keyPrefix`. For example, `keyPrefix: "myapp:abc:"` + `sharedTagsKey: "_tags"` results in the Redis key `myapp:abc:_tags`. Do **not** include the prefix in these values.
 
 ### createUseCacheHandler Options
 
 | Option | Type | Default | Description |
 |--------|------|---------|-------------|
 | `client` | `RedisClientType` | **required** | Connected `@redis/client` instance |
-| `keyPrefix` | `string` | `""` | Prefix for all cache keys |
-| `useCacheKeyPrefix` | `string` | `"uc:{keyPrefix}"` | Prefix for `"use cache"` entries specifically |
-| `sharedTagsKey` | `string` | `"__sharedTags__"` | Redis Hash key for tag mapping |
-| `sharedTagsTtlKey` | `string` | `"__sharedTagsTtl__"` | Redis Hash key for expiration tracking |
-| `revalidatedTagsKey` | `string` | `"__revalidated_tags__"` | Redis Hash key for tag revalidation timestamps |
+| `keyPrefix` | `string` | `""` | Prefix prepended to tag/TTL Hash keys |
+| `useCacheKeyPrefix` | `string` | `"uc:{keyPrefix}"` | Prefix for `"use cache"` data entries |
+| `sharedTagsKey` | `string` | `"__sharedTags__"` | Suffix for the tag mapping Hash (prefixed with `keyPrefix`) |
+| `sharedTagsTtlKey` | `string` | `"__sharedTagsTtl__"` | Suffix for the expiration tracking Hash (prefixed with `keyPrefix`) |
+| `revalidatedTagsKey` | `string` | `"__revalidated_tags__"` | Suffix for the tag revalidation Hash (prefixed with `keyPrefix`) |
 | `timeoutMs` | `number` | `5000` | Timeout (ms) for each Redis operation |
 
 ### cleanupOldBuildKeys Options
@@ -314,16 +345,14 @@ await cleanupOldBuildKeys({
   redisUrl: process.env.REDIS_URL!,
   patterns: [
     {
-      scan: "myapp:*",              // scan all keys with this prefix
+      scan: "myapp:*",                 // scan all keys under myapp:
       keepPrefix: `myapp:${buildId}:`, // keep current build's keys
-    },
-    {
-      scan: "myappTags:*",
-      keepExact: `myappTags:${buildId}`, // keep one exact key
     },
   ],
 });
 ```
+
+Since all keys (cache data, tags, TTLs, revalidation) share the same `keyPrefix`, a single pattern is sufficient to clean up everything from previous builds.
 
 The cleanup uses `SCAN` with `COUNT 200` to iterate keys without blocking the Redis server, and `DEL` to remove them in batch.
 
@@ -354,27 +383,31 @@ NEXT_PRIVATE_DEBUG_CACHE=1 npm run start
 
 ## Redis Key Structure
 
+All Redis keys are composed from `keyPrefix` + suffix. This keeps every key under a single namespace for easy cleanup.
+
 ```
 # Cache data (String keys with TTL)
-{keyPrefix}{cacheKey}                  → ISR page cache (JSON)
-{useCacheKeyPrefix}{cacheKey}          → "use cache" entries (base64 JSON)
+{keyPrefix}{cacheKey}                     → ISR page cache (JSON)
+{useCacheKeyPrefix}{cacheKey}             → "use cache" entries (base64 JSON)
 
-# Tag management (Hash keys)
-{keyPrefix}__sharedTags__              → { cacheKey: JSON(tags[]) }
-{keyPrefix}__sharedTagsTtl__           → { cacheKey: expireTimestamp }
-__revalidated_tags__                   → { tagName: revalidationTimestamp }
+# Tag management (Hash keys, auto-prefixed with keyPrefix)
+{keyPrefix}{sharedTagsKey}                → { cacheKey: JSON(tags[]) }
+{keyPrefix}{sharedTagsTtlKey}             → { cacheKey: expireTimestamp }
+{keyPrefix}{revalidatedTagsKey}           → { tagName: revalidationTimestamp }
 ```
 
-**Example** with `keyPrefix: "myapp:abc123:"`:
+**Example** with `keyPrefix: "myapp:abc:"`, `sharedTagsKey: "_tags"`, `revalidatedTagsKey: "_revalidated"`:
 
 ```
-myapp:abc123:/products          → '{"kind":"APP_PAGE","html":"...","rscData":"base64..."}'
-myapp:abc123:_useCache:/api/get → '{"data":"base64...","tags":["product"],"revalidate":3600}'
+myapp:abc:/products             → '{"kind":"APP_PAGE","html":"...","rscData":"base64..."}'
+myapp:abc:uc:/api/get           → '{"data":"base64...","tags":["product"],"revalidate":3600}'
 
-myapp:abc123:__sharedTags__     → { "/products": '["product","catalog"]' }
-myapp:abc123:__sharedTagsTtl__  → { "/products": "1707592843" }
-__revalidated_tags__            → { "product": "1707592000" }
+myapp:abc:_tags                 → { "/products": '["product","catalog"]' }
+myapp:abc:_tagTtls              → { "/products": "1707592843" }
+myapp:abc:_revalidated          → { "product": "1707592000" }
 ```
+
+Since all keys share the `myapp:abc:` prefix, a single cleanup pattern `{ scan: "myapp:*", keepPrefix: "myapp:abc:" }` removes all keys from previous builds.
 
 ## Example App
 
@@ -408,14 +441,14 @@ REDIS_URL=redis://localhost:6379 npm run build && npm run start
 
 ### Bringing the Handler Files to Your Own Project
 
-To use the cache handlers in your own Next.js app, copy the following files from `test-app/` and adjust the configuration:
+To use the cache handlers in your own Next.js app, create the following files based on the [Quick Start](#quick-start) examples:
 
-1. **`cache-handler.mjs`** — Legacy handler setup (modify `keyPrefix`, `sharedTagsKey`, etc.)
-2. **`use-cache-handler.mjs`** — `"use cache"` handler setup (modify `useCacheKeyPrefix`, etc.)
-3. **`next.config.ts`** — Add `cacheHandler`, `cacheHandlers`, and `cacheMaxMemorySize: 0`
-4. **`src/instrumentation.ts`** — Optional: add `registerInitialCache()` and `cleanupOldBuildKeys()`
+1. **`cache-handler.mjs`** — Legacy handler setup (change `keyPrefix` to your app name)
+2. **`use-cache-handler.mjs`** — `"use cache"` handler setup (use the same tag key suffixes)
+3. **`next.config.ts`** — Add `cacheHandler`, `cacheHandlers`, `cacheMaxMemorySize: 0`, and `generateBuildId`
+4. **`src/instrumentation.ts`** — Optional: add `cleanupOldBuildKeys()` and `registerInitialCache()`
 
-Replace the `test:${buildId}:` prefix pattern with your own app prefix. Remove the `storeCacheEntry()` calls (those are demo-only for the Cache Viewer).
+Replace `myapp` with your own app prefix (e.g., `docs`, `blog`). Ensure both handlers share the same `sharedTagsKey`, `sharedTagsTtlKey`, and `revalidatedTagsKey` values.
 
 ### Test Scenarios
 

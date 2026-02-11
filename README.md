@@ -6,7 +6,7 @@
 
 **Production-ready Redis cache handler for Next.js** — seamlessly supports both **legacy ISR** (`cacheHandler`) and the new **`"use cache"`** directive (`cacheHandlers`).
 
-[Live Demo](https://example.com) <!-- TODO: replace with real URL -->
+[Live Demo](https://next-redis-cache.vercel.app)
 
 ## Highlights
 
@@ -380,7 +380,7 @@ __revalidated_tags__            → { "product": "1707592000" }
 
 The repository includes a full test application with 14 interactive test scenarios.
 
-[Live Demo](https://example.com) <!-- TODO: replace with real URL -->
+[Live Demo](https://next-redis-cache.vercel.app)
 
 ### Two Operating Modes
 

@@ -255,14 +255,16 @@ export async function cleanupOldBuildKeys(
     const allOldKeys: string[] = [];
 
     for (const { scan, keepExact, keepPrefix } of patterns) {
-      for await (const key of client.scanIterator({
+      for await (const keys of client.scanIterator({
         MATCH: scan,
         COUNT: 200,
       })) {
-        const k = String(key);
-        if (keepExact && k === keepExact) continue;
-        if (keepPrefix && k.startsWith(keepPrefix)) continue;
-        allOldKeys.push(k);
+        for (const key of keys) {
+          const k = String(key);
+          if (keepExact && k === keepExact) continue;
+          if (keepPrefix && k.startsWith(keepPrefix)) continue;
+          allOldKeys.push(k);
+        }
       }
     }
 

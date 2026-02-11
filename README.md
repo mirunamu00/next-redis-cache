@@ -6,8 +6,6 @@
 
 **Production-ready Redis cache handler for Next.js** — seamlessly supports both **legacy ISR** (`cacheHandler`) and the new **`"use cache"`** directive (`cacheHandlers`).
 
-[Live Demo](https://next-redis-cache.vercel.app)
-
 ## Highlights
 
 - **Dual Handler Architecture** — Single package covers both `cacheHandler` (ISR/SSG pages) and `cacheHandlers` (React `"use cache"` directive)
@@ -411,31 +409,13 @@ Since all keys share the `myapp:abc:` prefix, a single cleanup pattern `{ scan: 
 
 ## Example App
 
-The repository includes a full test application with 14 interactive test scenarios.
-
-[Live Demo](https://next-redis-cache.vercel.app)
-
-### Two Operating Modes
-
-The demo app runs in two modes depending on whether `REDIS_URL` is set:
-
-| Mode | Condition | Behavior |
-|------|-----------|----------|
-| **In-memory visualization** | No `REDIS_URL` | Cache data is captured in-memory on every `set()` call. The **Cache Viewer** panel shows the exact data structure, tags, TTL, and serialized payload that *would* be stored in Redis. No actual caching occurs — every page visit generates fresh data. |
-| **Full Redis caching** | `REDIS_URL` set | Data is stored in and served from Redis. All test scenarios are fully functional, including build prewarming, old-key cleanup, and reconnection recovery. |
-
-The in-memory mode is designed for the public demo site, where visitors can explore each test scenario and see exactly what data flows through the cache handlers without requiring a Redis instance.
+The repository includes a full test application with interactive test scenarios.
 
 ### Run Locally
 
 ```bash
 cd test-app
 npm install
-
-# Option A: In-memory visualization (no Redis needed)
-npm run build && npm run start
-
-# Option B: Full Redis caching
 REDIS_URL=redis://localhost:6379 npm run build && npm run start
 ```
 
@@ -469,9 +449,7 @@ Replace `myapp` with your own app prefix (e.g., `docs`, `blog`). Ensure both han
 | | Cleanup * | `cleanupOldBuildKeys()` removes old build keys |
 | | Reconnect * | Graceful degradation on Redis connection loss |
 
-\* *Requires `REDIS_URL` — these tests show a notice when Redis is not available.*
-
-The test app includes a **Cache Viewer** panel at the bottom of every test page. It displays all cached entries in real-time, showing handler type (`legacy` / `use-cache`), cache key, serialized size, tags, and TTL.
+\* *Requires `REDIS_URL`*
 
 ## Compatibility
 

@@ -1,5 +1,11 @@
 # @mirunamu/next-redis-cache
 
+## 1.0.3
+
+### Patch Changes
+
+- [`9f0a913`](https://github.com/mirunamu00/next-redis-cache/commit/9f0a913e560aef3eefb3df62a1f3afa816e92989) Thanks [@geonwooo-park](https://github.com/geonwooo-park)! - chore: remove test application and related files
+
 ## 1.0.2
 
 ### Patch Changes

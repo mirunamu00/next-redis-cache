@@ -2,10 +2,8 @@
 // Every step runs even if an earlier one fails; the gate fails if any step failed.
 // Usage: npm run build && npm run quality
 //
-// Known exception (removed in ROADMAP.md section 7, P1):
-//   attw false-esm - the exports "types" condition points at .d.ts unconditionally, so CJS (require)
-//   consumers get ESM typings. Conditional types (.d.cts) are fixed in P1 (1.1.0). Until then only this
-//   rule is ignored; everything else is checked.
+// attw runs without exceptions: since 1.1.0 every export has conditional types (import -> .d.ts,
+// require -> .d.cts), so CJS consumers get CJS typings (the former false-esm exception is gone).
 import { fileURLToPath } from "node:url";
 import { existsSync } from "node:fs";
 import { run } from "./lib/run.mjs";
@@ -20,7 +18,7 @@ if (!existsSync("dist")) {
 
 const steps = [
   ["publint", "npx", ["publint"]],
-  ["attw", "npx", ["attw", "--pack", ".", "--profile", "node16", "--ignore-rules", "false-esm"]],
+  ["attw", "npx", ["attw", "--pack", ".", "--profile", "node16"]],
   ["size-limit", "npx", ["size-limit"]],
   ["check-pack", "node", ["scripts/check-pack.mjs"]],
   ["check-no-hangul", "node", ["scripts/check-no-hangul.mjs"]],

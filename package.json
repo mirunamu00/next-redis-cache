@@ -3,30 +3,61 @@
   "version": "1.0.6",
   "description": "Redis cache handler for Next.js 16 — supports both legacy cacheHandler (ISR) and use-cache cacheHandlers",
   "license": "MIT",
+  "author": "mirunamu00",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/mirunamu00/next-redis-cache.git"
+  },
+  "homepage": "https://github.com/mirunamu00/next-redis-cache#readme",
+  "bugs": {
+    "url": "https://github.com/mirunamu00/next-redis-cache/issues"
+  },
   "type": "module",
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "import": "./dist/index.js",
-      "require": "./dist/index.cjs"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./use-cache": {
-      "types": "./dist/use-cache.d.ts",
-      "import": "./dist/use-cache.js",
-      "require": "./dist/use-cache.cjs"
+      "import": {
+        "types": "./dist/use-cache.d.ts",
+        "default": "./dist/use-cache.js"
+      },
+      "require": {
+        "types": "./dist/use-cache.d.cts",
+        "default": "./dist/use-cache.cjs"
+      }
     },
     "./instrumentation": {
-      "types": "./dist/instrumentation.d.ts",
-      "import": "./dist/instrumentation.js",
-      "require": "./dist/instrumentation.cjs"
-    }
+      "import": {
+        "types": "./dist/instrumentation.d.ts",
+        "default": "./dist/instrumentation.js"
+      },
+      "require": {
+        "types": "./dist/instrumentation.d.cts",
+        "default": "./dist/instrumentation.cjs"
+      }
+    },
+    "./package.json": "./package.json"
   },
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "types": "./dist/index.d.cts",
   "files": [
     "dist"
   ],
+  "engines": {
+    "node": ">=18.18.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",

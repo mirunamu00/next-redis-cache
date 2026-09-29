@@ -7,7 +7,7 @@
 
 import { streamToBuffer, bufferToStream } from "./stream-utils";
 import { TagManager } from "./tag-manager";
-import { assertClientReady, withTimeout } from "./redis-client";
+import { runCommand } from "./redis-client";
 import { resolveOptions, type UseCacheHandlerOptions } from "./types";
 
 // ------------------------------------------------------------------
@@ -72,9 +72,8 @@ export function createUseCacheHandler(
   // Track pending set operations so concurrent gets can wait
   const pendingSets = new Map<string, Promise<void>>();
 
-  function exec<T>(promise: Promise<T>): Promise<T> {
-    assertClientReady(client);
-    return withTimeout(promise, timeoutMs);
+  function exec<T>(command: () => Promise<T>): Promise<T> {
+    return runCommand(client, command, timeoutMs);
   }
 
   const handler: CacheHandler = {
@@ -90,7 +89,7 @@ export function createUseCacheHandler(
           await pending;
         }
 
-        const raw = await exec(client.get(keyPrefix + cacheKey));
+        const raw = await exec(() => client.get(keyPrefix + cacheKey));
 
         if (!raw) {
           log("get", cacheKey, "miss");
@@ -185,7 +184,7 @@ export function createUseCacheHandler(
           Math.floor(entry.expire - (Date.now() - entry.timestamp) / 1000)
         );
 
-        await exec(client.set(fullKey, serialized, { EX: ttlSeconds }));
+        await exec(() => client.set(fullKey, serialized, { EX: ttlSeconds }));
 
         log("set", cacheKey, `done (${buffer.byteLength} bytes)`);
       } catch (err) {

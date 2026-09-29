@@ -26,3 +26,21 @@ export function withTimeout<T>(
   });
   return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
 }
+
+/**
+ * Runs one Redis command. Readiness is checked BEFORE the command is created, so nothing is sent
+ * (or parked in the client's offline queue) while the client is disconnected or reconnecting, and
+ * no command promise is ever left without a rejection handler. `command` must be a thunk.
+ */
+export function runCommand<T>(
+  client: RedisClientType,
+  command: () => Promise<T>,
+  ms: number
+): Promise<T> {
+  try {
+    assertClientReady(client);
+    return withTimeout(command(), ms);
+  } catch (err) {
+    return Promise.reject(err);
+  }
+}

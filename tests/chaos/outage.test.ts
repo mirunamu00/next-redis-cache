@@ -3,7 +3,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 import { createClient } from "@redis/client";
 import type { ProxyHandle } from "../support/toxiproxy";
-import { itRepro } from "../support/repro";
 import { waitFor } from "../support/wait-for";
 import { directRedisUrl, launch, redisProxy, sleep, traffic, unhandledTotal, type Fleet } from "./harness";
 
@@ -78,11 +77,11 @@ describe("C2 Redis unreachable during traffic", () => {
     expect(outcome.crashed).toEqual([]);
   });
 
-  itRepro("7-3", "C2 no unhandled rejections (I2)", () => {
+  it("[7-3] C2 no unhandled rejections (I2)", () => {
     expect(outcome.unhandled).toBe(0);
   });
 
-  itRepro("7-3", "C2 requests made during the outage are not replayed against Redis after recovery (A4)", async () => {
+  it("[7-3] C2 requests made during the outage are not replayed against Redis after recovery (A4)", async () => {
     await proxy.disable();
     await waitFor(async () => {
       const r = await fleet.request("/dyn/9");
@@ -111,7 +110,7 @@ describe("C5 connections reset by peer", () => {
     expect(outcome.crashed).toEqual([]);
   });
 
-  itRepro("7-3", "C5 no unhandled rejections (I2)", () => {
+  it("[7-3] C5 no unhandled rejections (I2)", () => {
     expect(outcome.unhandled).toBe(0);
   });
 });

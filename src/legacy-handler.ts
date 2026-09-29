@@ -8,7 +8,7 @@
 import type { RedisClientType } from "@redis/client";
 import { parseBuffersToStrings, convertStringsToBuffers } from "./buffer-utils";
 import { TagManager } from "./tag-manager";
-import { assertClientReady, withTimeout } from "./redis-client";
+import { assertClientReady, runCommand } from "./redis-client";
 import { resolveOptions, type OnCreationHook } from "./types";
 
 // ------------------------------------------------------------------
@@ -202,13 +202,11 @@ export class LegacyCacheHandler {
     // No Redis (build phase or null config)
     if (!client || !tm) return null;
 
-    try {
-      assertClientReady(client);
+    const t = LegacyCacheHandler.#timeoutMs;
+    const fullKey = LegacyCacheHandler.#keyPrefix + cacheKey;
 
-      const raw = await withTimeout(
-        client.get(LegacyCacheHandler.#keyPrefix + cacheKey),
-        LegacyCacheHandler.#timeoutMs
-      );
+    try {
+      const raw = await runCommand(client, () => client.get(fullKey), t);
 
       if (!raw) {
         log("get", cacheKey, "miss");
@@ -226,10 +224,7 @@ export class LegacyCacheHandler {
       // Check tag entry exists
       const hasEntry = await tm.hasTagEntry(cacheKey);
       if (!hasEntry) {
-        await withTimeout(
-          client.unlink(LegacyCacheHandler.#keyPrefix + cacheKey),
-          LegacyCacheHandler.#timeoutMs
-        );
+        await runCommand(client, () => client.unlink(fullKey), t);
         log("get", cacheKey, "orphaned (no tag entry)");
         return null;
       }
@@ -249,10 +244,7 @@ export class LegacyCacheHandler {
       ];
 
       if (await tm.isStale(combinedTags, stored.lastModified)) {
-        await withTimeout(
-          client.unlink(LegacyCacheHandler.#keyPrefix + cacheKey),
-          LegacyCacheHandler.#timeoutMs
-        );
+        await runCommand(client, () => client.unlink(fullKey), t);
         log("get", cacheKey, "stale (revalidated tag)");
         return null;
       }
@@ -277,6 +269,7 @@ export class LegacyCacheHandler {
     if (!client || !tm) return;
 
     try {
+      // Fail fast (before serializing) while Redis is unavailable
       assertClientReady(client);
 
       const tags: string[] =
@@ -330,7 +323,7 @@ export class LegacyCacheHandler {
 
       await Promise.all([
         // Store value with TTL in a single command
-        withTimeout(client.set(fullKey, serialized, setOpts), t),
+        runCommand(client, () => client.set(fullKey, serialized, setOpts), t),
         // Register tags
         tm.setTags(cacheKey, tags),
         // Register TTL

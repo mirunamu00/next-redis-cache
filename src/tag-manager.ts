@@ -6,7 +6,7 @@
  */
 
 import type { RedisClientType } from "@redis/client";
-import { assertClientReady, withTimeout } from "./redis-client";
+import { assertClientReady, runCommand } from "./redis-client";
 import { isImplicitTag, type ResolvedRedisOptions } from "./types";
 
 export class TagManager {
@@ -26,36 +26,35 @@ export class TagManager {
     this.timeoutMs = opts.timeoutMs;
   }
 
-  private exec<T>(promise: Promise<T>): Promise<T> {
-    assertClientReady(this.client);
-    return withTimeout(promise, this.timeoutMs);
+  private exec<T>(command: () => Promise<T>): Promise<T> {
+    return runCommand(this.client, command, this.timeoutMs);
   }
 
   /** Register tags for a cache key */
   async setTags(key: string, tags: readonly string[]): Promise<void> {
     await this.exec(
-      this.client.hSet(this.sharedTagsKey, key, JSON.stringify(tags))
+      () => this.client.hSet(this.sharedTagsKey, key, JSON.stringify(tags))
     );
   }
 
   /** Register TTL for a cache key */
   async setTtl(key: string, expireAt: number): Promise<void> {
     await this.exec(
-      this.client.hSet(this.sharedTagsTtlKey, key, expireAt.toString())
+      () => this.client.hSet(this.sharedTagsTtlKey, key, expireAt.toString())
     );
   }
 
   /** Check if a cache key's tags entry exists */
   async hasTagEntry(key: string): Promise<boolean> {
-    const result = await this.exec(this.client.hExists(this.sharedTagsKey, key));
+    const result = await this.exec(() => this.client.hExists(this.sharedTagsKey, key));
     return !!result;
   }
 
   /** Delete tag and TTL entries for a cache key */
   async deleteTags(key: string): Promise<void> {
     await Promise.all([
-      this.exec(this.client.hDel(this.sharedTagsKey, key)),
-      this.exec(this.client.hDel(this.sharedTagsTtlKey, key)),
+      this.exec(() => this.client.hDel(this.sharedTagsKey, key)),
+      this.exec(() => this.client.hDel(this.sharedTagsTtlKey, key)),
     ]);
   }
 
@@ -67,7 +66,7 @@ export class TagManager {
     if (tags.length === 0) return false;
 
     const times = await this.exec(
-      this.client.hmGet(this.revalidatedTagsKey, tags)
+      () => this.client.hmGet(this.revalidatedTagsKey, tags)
     );
 
     for (const t of times) {
@@ -89,7 +88,7 @@ export class TagManager {
     // Mark implicit tags with a revalidation timestamp
     if (isImplicitTag(tag)) {
       await this.exec(
-        this.client.hSet(this.revalidatedTagsKey, tag, Date.now().toString())
+        () => this.client.hSet(this.revalidatedTagsKey, tag, Date.now().toString())
       );
     }
 
@@ -100,7 +99,7 @@ export class TagManager {
     let cursor = "0";
     do {
       const result = await this.exec(
-        this.client.hScan(this.sharedTagsKey, cursor, { COUNT: 10000 })
+        () => this.client.hScan(this.sharedTagsKey, cursor, { COUNT: 10000 })
       );
 
       for (const { field, value } of result.entries) {
@@ -117,9 +116,9 @@ export class TagManager {
     if (keysToDelete.length === 0) return;
 
     await Promise.all([
-      this.exec(this.client.unlink(keysToDelete)),
-      this.exec(this.client.hDel(this.sharedTagsKey, tagsToDelete)),
-      this.exec(this.client.hDel(this.sharedTagsTtlKey, tagsToDelete)),
+      this.exec(() => this.client.unlink(keysToDelete)),
+      this.exec(() => this.client.hDel(this.sharedTagsKey, tagsToDelete)),
+      this.exec(() => this.client.hDel(this.sharedTagsTtlKey, tagsToDelete)),
     ]);
   }
 
@@ -134,7 +133,7 @@ export class TagManager {
     let cursor = "0";
     do {
       const result = await this.exec(
-        this.client.hScan(this.sharedTagsTtlKey, cursor, { COUNT: 10000 })
+        () => this.client.hScan(this.sharedTagsTtlKey, cursor, { COUNT: 10000 })
       );
 
       for (const { field, value } of result.entries) {
@@ -150,9 +149,9 @@ export class TagManager {
     if (entriesToDelete.length === 0) return;
 
     await Promise.all([
-      this.exec(this.client.unlink(keysToDelete)),
-      this.exec(this.client.hDel(this.sharedTagsKey, entriesToDelete)),
-      this.exec(this.client.hDel(this.sharedTagsTtlKey, entriesToDelete)),
+      this.exec(() => this.client.unlink(keysToDelete)),
+      this.exec(() => this.client.hDel(this.sharedTagsKey, entriesToDelete)),
+      this.exec(() => this.client.hDel(this.sharedTagsTtlKey, entriesToDelete)),
     ]);
   }
 
@@ -166,7 +165,7 @@ export class TagManager {
     if (tags.length === 0) return 0;
 
     const times = await this.exec(
-      this.client.hmGet(this.revalidatedTagsKey, tags)
+      () => this.client.hmGet(this.revalidatedTagsKey, tags)
     );
 
     let max = 0;
@@ -201,7 +200,7 @@ export class TagManager {
     }
 
     if (Object.keys(entries).length > 0) {
-      await this.exec(this.client.hSet(this.revalidatedTagsKey, entries));
+      await this.exec(() => this.client.hSet(this.revalidatedTagsKey, entries));
     }
   }
 }

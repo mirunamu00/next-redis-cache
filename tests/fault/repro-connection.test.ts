@@ -1,6 +1,6 @@
-// Reproductions of the connection-handling bugs (ROADMAP.md 7-2, 7-3, 7-7, 7-9) with mini-redis and
-// closed ports - no Docker. Every test asserts the correct behavior and is an expected failure on
-// 1.0.6 (see tests/support/repro.ts).
+// Connection-handling bugs (ROADMAP.md 7-2, 7-3, 7-7, 7-9) with mini-redis and closed ports - no Docker.
+// Every test asserts the correct behavior; `itRepro` marks the ones still expected to fail
+// (see tests/support/repro.ts), plain `it` the ones fixed since 1.0.6.
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createClient } from "@redis/client";
 import { startMiniRedis, type MiniRedis } from "../support/mini-redis";
@@ -85,8 +85,8 @@ describe("7-2 connection wiring from the README", () => {
   });
 });
 
-describe("7-3 commands are sent before the readiness check", () => {
-  itRepro("7-3", "use-cache get on a closed client causes no unhandled rejections", async () => {
+describe("7-3 readiness is checked before a command is sent", () => {
+  it("[7-3] use-cache get on a closed client causes no unhandled rejections", async () => {
     const m = await mini();
     const c = client(m.url, false);
     await c.connect();
@@ -100,7 +100,7 @@ describe("7-3 commands are sent before the readiness check", () => {
     expect(rejections).toHaveLength(0);
   });
 
-  itRepro("7-3", "use-cache gets during a reconnect are not queued and replayed after recovery", async () => {
+  it("[7-3] use-cache gets during a reconnect are not queued and replayed after recovery", async () => {
     const m = await mini();
     const c = client(m.url, 50);
     await c.connect();
@@ -119,7 +119,7 @@ describe("7-3 commands are sent before the readiness check", () => {
     expect(replayed).toHaveLength(0);
   });
 
-  it("[7-3] legacy handler checks readiness before sending (not affected)", async () => {
+  it("[7-3] legacy handler checks readiness before sending (was not affected in 1.0.6)", async () => {
     const m = await mini();
     const c = client(m.url, 50);
     await c.connect();

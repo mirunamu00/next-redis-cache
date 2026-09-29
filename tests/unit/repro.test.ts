@@ -1,4 +1,4 @@
-// Reproductions that need no network (ROADMAP.md 7-8, 7-10, 7-11, 7-13). Each asserts the correct
+// Reproductions that need no network (ROADMAP.md 7-7, 7-8, 7-10, 7-11, 7-13). Each asserts the correct
 // behavior and is an expected failure on 1.0.6 (tests/support/repro.ts).
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -42,6 +42,40 @@ function recordingClient() {
 
 afterEach(() => {
   vi.useRealTimers();
+  vi.restoreAllMocks();
+});
+
+describe("7-7 error reporting", () => {
+  const consoleSpies = () => ({
+    warn: vi.spyOn(console, "warn").mockImplementation(() => {}),
+    info: vi.spyOn(console, "info").mockImplementation(() => {}),
+  });
+
+  itRepro("7-7", "use-cache: an outage is warned about once (not per request) and the recovery is reported", async () => {
+    const { client } = recordingClient();
+    const { warn, info } = consoleSpies();
+    const handler = createUseCacheHandler({ client: client as never, keyPrefix: "t:" });
+    client.isReady = false;
+    for (let i = 0; i < 20; i++) expect(await handler.get(`k${i}`, [])).toBeUndefined();
+    expect(warn).toHaveBeenCalledTimes(1);
+    client.isReady = true;
+    await handler.get("k", []);
+    await handler.get("k", []);
+    expect(info).toHaveBeenCalledTimes(1);
+    expect(String(info.mock.calls[0]?.[0])).toMatch(/recovered/);
+  });
+
+  itRepro("7-7", "legacy: failing sets are warned about once until Redis recovers", async () => {
+    const { client } = recordingClient();
+    const { warn, info } = consoleSpies();
+    const { handler } = await freshLegacy({ client: client as never, keyPrefix: "t:" });
+    client.isReady = false;
+    for (let i = 0; i < 20; i++) await handler.set(`/p${i}`, { kind: "FETCH", data: { headers: {}, body: "e30=", status: 200 }, revalidate: 60 }, { tags: [] });
+    expect(warn).toHaveBeenCalledTimes(1);
+    client.isReady = true;
+    await handler.set("/p", { kind: "FETCH", data: { headers: {}, body: "e30=", status: 200 }, revalidate: 60 }, { tags: [] });
+    expect(info).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe("7-8 declared compatibility", () => {

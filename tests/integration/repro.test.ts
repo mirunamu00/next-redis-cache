@@ -1,6 +1,9 @@
 // Reproductions against real Redis (ROADMAP.md 7-1, 7-4, 7-5, 7-6, 7-9, 7-11, 7-12), once per Redis
 // version under test. Each asserts the correct behavior and is an expected failure on 1.0.6
 // (tests/support/repro.ts). Tests that pin behavior 1.0.6 already gets right use plain `it`.
+import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { redisVersionsUnderTest, startRedisContainer, type RedisServer } from "../support/redis-container";
@@ -70,14 +73,26 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       await handler.set("/page", appPageValue("<p>fresh</p>", ["t"]), { revalidate: false });
       expect(await handler.get("/page", { softTags: [] })).not.toBeNull();
     });
+
+    itRepro("7-1", "a future tag timestamp left by 1.0.x heals: an entry written after the next read is a hit", async () => {
+      const ns = uniqueNamespace();
+      const uc = createUseCacheHandler(options(ns));
+      await client.hSet(`${ns}:_revalidated`, "t", String(Date.now() + YEAR * 1000));
+      await uc.set("k", Promise.resolve(useCacheEntry({ value: "old", tags: ["t"], timestamp: Date.now() - 1000 })));
+      expect(await uc.get("k", []), "an entry older than the heal stays a miss").toBeUndefined();
+      await new Promise((r) => setTimeout(r, 5));
+      await uc.set("k", Promise.resolve(useCacheEntry({ value: "fresh", tags: ["t"] })));
+      expect(await readEntry(await uc.get("k", []))).toBe("fresh");
+      expect(Number(await client.hGet(`${ns}:_revalidated`, "t"))).toBeLessThanOrEqual(Date.now());
+    });
   });
 
   describe("7-4 prewarm from build output", () => {
-    const prewarm = async (ns: string) => {
+    const prewarm = async (ns: string, root = FIXTURE_ROOT) => {
       const { registerInitialCache } = await freshInstrumentation();
       const { Handler } = await freshLegacy(options(ns));
       const cwd = process.cwd();
-      process.chdir(FIXTURE_ROOT);
+      process.chdir(root);
       try {
         return await registerInitialCache(Handler, { setOnlyIfNotExists: true });
       } finally {
@@ -116,6 +131,32 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       const raw = await client.get(`${ns}:/_not-found`);
       expect(raw, "/_not-found prewarmed").not.toBeNull();
       expect((JSON.parse(raw!) as { value: { status?: number } }).value.status).toBe(404);
+    });
+
+    itRepro("7-4", "APP_ROUTE entries keep status and headers from their meta", async () => {
+      const ns = uniqueNamespace();
+      await prewarm(ns);
+      const raw = await client.get(`${ns}:/icon`);
+      expect(raw, "/icon prewarmed").not.toBeNull();
+      const { value } = JSON.parse(raw!) as { value: { kind: string; status?: number; headers?: Record<string, string> } };
+      expect(value.kind).toBe("APP_ROUTE");
+      expect(value.status).toBe(200);
+      expect(value.headers?.["content-type"]).toBe("image/png");
+    });
+
+    itRepro("7-4", "a partially prerendered page keeps its postponed state from the meta", async () => {
+      const root = mkdtempSync(path.join(tmpdir(), "nrc-ppr-"));
+      try {
+        cpSync(FIXTURE_ROOT, root, { recursive: true });
+        const metaPath = path.join(root, ".next", "server", "app", "about.meta");
+        writeFileSync(metaPath, JSON.stringify({ ...JSON.parse(readFileSync(metaPath, "utf8")), postponed: "ppr-state" }));
+        const ns = uniqueNamespace();
+        await prewarm(ns, root);
+        const stored = JSON.parse((await client.get(`${ns}:/about`))!) as { value: { postponed?: string } };
+        expect(stored.value.postponed).toBe("ppr-state");
+      } finally {
+        rmSync(root, { recursive: true, force: true });
+      }
     });
   });
 
@@ -177,6 +218,14 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       const { deleted } = await cleanupOldBuildKeys({ redisUrl: server.url, patterns: [{ scan: `${ns}:*`, keepPrefix: `${ns}:new:` }] });
       expect(deleted).toBe(10_000);
       expect((await calls()) - before).toBeGreaterThanOrEqual(20);
+    });
+
+    itRepro("7-9", "overlapping patterns delete and count every key once", async () => {
+      const ns = uniqueNamespace();
+      for (let i = 0; i < 100; i++) await client.set(`${ns}:old:k${i}`, "x", { expiration: { type: "EX", value: 600 } });
+      const { cleanupOldBuildKeys } = await freshInstrumentation();
+      const { deleted } = await cleanupOldBuildKeys({ redisUrl: server.url, patterns: [{ scan: `${ns}:*` }, { scan: `${ns}:old:*` }] });
+      expect(deleted).toBe(100);
     });
 
     itRepro("7-9", "keeps keys of an old build that is still being served (recently accessed)", async () => {

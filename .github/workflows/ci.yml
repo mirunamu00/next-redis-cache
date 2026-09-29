@@ -1,10 +1,13 @@
 # CI - quality gate (ROADMAP.md section 6.8)
 #
-# Job graph at this stage (P0a):
+# Job graph at this stage (P0b):
 #   static (no-hangul, lint, typecheck, build, quality) --+
-#   unit (Node 22, 24)                                    +-- gate (the only required check for branch protection)
-#   unit-windows (layers that need no Docker)           --+
-# integration/fault (P0b) and contract/e2e (P0c) join this graph in later stages.
+#   unit (Node 22, 24)                                    |
+#   unit-windows (layers that need no Docker)             +-- gate (the only required check for branch protection)
+#   integration (Redis 7.2, 8.4 via testcontainers)       |
+#   fault (mini-redis + toxiproxy from docker compose)  --+
+# contract/e2e (P0c) join this graph in later stages.
+# GitHub Windows runners cannot run Linux containers, so Docker layers run on Linux only (Q17).
 #
 # Node 20 is not in the matrix: it reached EOL on 2026-04-30 and the test tooling (vitest 5, size-limit 14)
 # requires Node ^22.12. Actions are pinned to commit SHAs (protects against tag moves); the comment is the tag.
@@ -90,13 +93,70 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm test
+      - name: Fault layer without Docker (mini-redis)
+        run: npm run test:fault:nodocker
       - run: npm run build
       - run: npm run check-pack
+
+  integration:
+    name: integration (Redis ${{ matrix.redis }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        redis: ["7.2", "8.4"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Integration tests (testcontainers)
+        run: npm run test:int
+        env:
+          NRC_REDIS_VERSIONS: ${{ matrix.redis }}
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: integration-redis${{ matrix.redis }}
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  fault:
+    name: fault (mini-redis + toxiproxy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Start infrastructure (redis84 + toxiproxy)
+        run: npm run infra:up -- redis84 toxiproxy
+      - run: npm run test:fault
+      - name: Infrastructure logs
+        if: failure()
+        run: npm run infra:logs
+      - name: Stop infrastructure
+        if: always()
+        run: npm run infra:down
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: fault
+          path: reports/
+          if-no-files-found: ignore
+          retention-days: 14
 
   gate:
     name: gate
     if: always()
-    needs: [static, unit, unit-windows]
+    needs: [static, unit, unit-windows, integration, fault]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -147,6 +147,20 @@ export class FakeRedis {
     });
   }
 
+  /** Per-field TTLs set by HEXPIRE (field -> expiry time in ms); not enforced, only recorded. */
+  readonly fieldExpires = new Map<string, number>();
+
+  hExpire(key: string, fields: string[], seconds: number) {
+    return this.#op("hExpire", [key, fields, seconds], () => {
+      const h = this.#hash(key);
+      return fields.map((f) => {
+        if (!h?.has(f)) return -2;
+        this.fieldExpires.set(`${key}|${f}`, Date.now() + seconds * 1000);
+        return 1;
+      });
+    });
+  }
+
   hGetAll(key: string) {
     return this.#op("hGetAll", [key], () => Object.fromEntries(this.#hash(key) ?? []));
   }

@@ -1,9 +1,7 @@
 // Build-output fallback and re-seeding (ROADMAP.md 5.4, A2): prerendered pages and route handlers answer
 // from `.next/server/app` (read by Next's own FileSystemCache) when Redis has nothing or is unavailable.
 // Uses the next-build fixture (a Next 16.3.6 static-site build) and an in-memory client.
-import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
+import { statSync } from "node:fs";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { CacheEvent, RedisCacheConfig } from "../../src/types";
@@ -12,39 +10,9 @@ import { decodeEnvelope } from "../../src/envelope";
 import { fakeRedis } from "../support/fake-redis";
 import { legacyHandler } from "../support/handlers";
 import { waitFor } from "../support/wait-for";
+import { BUILD_TIME, buildCopy } from "../support/build-fixture";
 
-const FIXTURE_DIST = fileURLToPath(new URL("../fixtures/next-build/.next/", import.meta.url));
-/**
- * Build time of the copies the tests use. Fixed and in the past: the tag checks compare invalidation times
- * with the file time strictly (Next's areTagsExpired: `expired > timestamp`), so a copy written in the same
- * millisecond as an invalidation made the result depend on the machine's speed (CI run 36544312834,
- * unit Node 24: "expected 1790671317671 to be -1").
- */
-const BUILD_TIME = new Date("2026-01-01T00:00:00Z");
 const ABOUT_MTIME = BUILD_TIME.getTime();
-
-/** Copies the fixture build output (optionally editing the manifest) with every file at BUILD_TIME. */
-type Manifest = { routes: Record<string, { srcRoute?: string }>; dynamicRoutes?: Record<string, { fallback: false | null | string }> };
-
-function buildCopy(editManifest?: (manifest: Manifest) => void) {
-  const root = mkdtempSync(path.join(tmpdir(), "nrc-bo-"));
-  cpSync(FIXTURE_DIST, root, { recursive: true });
-  if (editManifest) {
-    const file = path.join(root, "prerender-manifest.json");
-    const manifest = JSON.parse(readFileSync(file, "utf8")) as Manifest;
-    editManifest(manifest);
-    writeFileSync(file, JSON.stringify(manifest));
-  }
-  const touch = (dir: string) => {
-    for (const e of readdirSync(dir, { withFileTypes: true })) {
-      const p = path.join(dir, e.name);
-      if (e.isDirectory()) touch(p);
-      else utimesSync(p, BUILD_TIME, BUILD_TIME);
-    }
-  };
-  touch(root);
-  return { serverDistDir: path.join(root, "server"), cleanup: () => rmSync(root, { recursive: true, force: true }) };
-}
 
 let copy: ReturnType<typeof buildCopy>;
 let SERVER_DIST: string;
@@ -118,9 +86,11 @@ describe("serving from the build output", () => {
 
 /** A copy of the fixture where /about is a prerendered path of a dynamicParams = false route. */
 const fallbackFalseCopy = () =>
-  buildCopy((manifest) => {
-    manifest.routes["/about"].srcRoute = "/[page]";
-    manifest.dynamicRoutes = { "/[page]": { fallback: false } };
+  buildCopy({
+    manifest: (manifest) => {
+      manifest.routes["/about"]!.srcRoute = "/[page]";
+      manifest.dynamicRoutes = { "/[page]": { fallback: false } };
+    },
   });
 
 describe("tag state of build-output entries", () => {

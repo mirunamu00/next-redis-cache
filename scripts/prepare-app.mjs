@@ -13,7 +13,7 @@
 // symlinked), node_modules/, builds/<id>/ (standalone server with .next/static, public/ and _shared/).
 // Dependencies are reinstalled only when the lockfile changes; the package only when the tarball changes.
 import { spawn } from "node:child_process";
-import { cpSync, mkdirSync, readdirSync, renameSync, statSync } from "node:fs";
+import { cpSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
@@ -172,6 +172,7 @@ async function build(app, variant, dir, buildId, { api }) {
   const meta = { app, variant, buildId, api, builtAt: new Date().toISOString(), ...verifySingleInstances(dir) };
   writeJson(path.join(out, "nrc-build.json"), meta);
   if (!exists(path.join(out, "server.js"))) throw new Error(`standalone server.js missing in ${out}`);
+  if (process.platform === "win32") warmFiles(out);
   log(`${app}@${variant}: build ${buildId} ready at ${path.relative(REPO_ROOT, out)} (${Math.round(dirSize(out) / 1e6)} MB)`);
   return out;
 }
@@ -183,6 +184,30 @@ function dirSize(dir) {
     total += e.isDirectory() ? dirSize(p) : statSync(p).size;
   }
   return total;
+}
+
+/**
+ * Reads every file of a fresh build once. On Windows the real-time antivirus scans each new file on
+ * first open; for static-site (about 3,300 files) that took over 3 minutes and pushed the first server
+ * start past the fleet readiness timeout. Paying it here keeps test timing independent of the scanner.
+ * (Excluding .work/ from Defender makes this instant.)
+ */
+function warmFiles(dir) {
+  const started = Date.now();
+  let files = 0;
+  const walk = (d) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const p = path.join(d, e.name);
+      if (e.isDirectory()) walk(p);
+      else {
+        readFileSync(p);
+        files++;
+      }
+    }
+  };
+  walk(dir);
+  const ms = Date.now() - started;
+  if (ms > 5000) log(`first read of ${files} new files took ${Math.round(ms / 1000)}s (antivirus scan?) - consider excluding .work/`);
 }
 
 /**

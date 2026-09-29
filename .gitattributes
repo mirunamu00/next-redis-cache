@@ -10,3 +10,4 @@
 *.woff2 binary
 *.tgz binary
 *.rdb binary
+*.body binary

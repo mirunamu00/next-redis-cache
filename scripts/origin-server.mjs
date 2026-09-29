@@ -2,7 +2,7 @@
 // counts how often each datum is fetched. Pages fetch from it, so "origin hits" tell a test whether a
 // response was regenerated (hit count grows) or served from the cache (hit count unchanged).
 //
-//   GET  /data/:key[?delay=ms]  -> { key, version, servedAt }   (counts a hit; optional delay)
+//   GET  /data/:key[?delay=ms]  -> { key, version, servedAt }   (counts a hit; version read on arrival, then optional delay)
 //   POST /data/:key             -> { key, version }             (bumps the version)
 //   POST /delay/:key?ms=N       -> sets a default delay for the key (0 clears it)
 //   GET  /hits                  -> { [key]: count }
@@ -45,9 +45,12 @@ export async function startOriginServer({ port = 0, host = "127.0.0.1" } = {}) {
         const key = parts[1];
         if (req.method === "GET") {
           hits.set(key, (hits.get(key) ?? 0) + 1);
+          // The version is read when the request arrives, like a database read at the start of a slow
+          // render: an invalidation that lands during the delay must not be reflected in this response.
+          const version = versions.get(key) ?? 1;
           const delay = Number(url.searchParams.get("delay") ?? delays.get(key) ?? 0);
           if (delay > 0) await new Promise((r) => setTimeout(r, delay));
-          return json(res, 200, { key, version: versions.get(key) ?? 1, servedAt: Date.now() });
+          return json(res, 200, { key, version, servedAt: Date.now() });
         }
         if (req.method === "POST") {
           const version = (versions.get(key) ?? 1) + 1;

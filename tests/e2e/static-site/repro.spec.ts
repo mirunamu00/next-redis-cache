@@ -1,10 +1,10 @@
-// Known-bug reproductions on static-site (ROADMAP.md 7-4, A2). Expected failures on 1.0.6.
+// Known-bug reproductions on static-site (ROADMAP.md 7-4, A2). 7-4 is fixed in 1.1.0 (1.0.6 stored segment
+// keys without the leading slash, so Next found no segment and the prefetch answered 404); A2 waits for P3.
 import { expect, getPage, launchFleet, repro, segmentPrefetch, test } from "../fixtures";
 
 test.describe("static-site reproductions", () => {
-  test("[7-4] segment prefetch of a prewarmed page answers 200", async ({ fleet }) => {
-    repro("7-4", "prewarm stores segment keys without the leading slash, so Next finds no segment");
-    for (const p of ["/about", "/docs/guide/doc-6"]) {
+  test("[7-4] segment prefetch of a prewarmed page answers 200 (A6)", async ({ fleet }) => {
+    for (const p of ["/", "/about", "/docs/guide/doc-6"]) {
       expect((await getPage(fleet, p)).status, p).toBe(200);
       expect((await segmentPrefetch(fleet, p, "/_tree")).status, `${p} /_tree`).toBe(200);
     }

@@ -106,26 +106,26 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       expect(await client.exists(`${ns}:/about`)).toBe(1);
     });
 
-    itRepro("7-4", "segment keys match the meta segmentPaths (/_tree, /about/__PAGE__)", async () => {
+    it("[7-4] segment keys match the meta segmentPaths (/_tree, /about/__PAGE__)", async () => {
       const ns = uniqueNamespace();
       await prewarm(ns);
       const stored = JSON.parse((await client.get(`${ns}:/about`))!) as { value: { segmentData: Record<string, string> } };
       expect(Object.keys(stored.value.segmentData).sort()).toEqual(["/_full", "/_tree", "/about/__PAGE__"]);
     });
 
-    itRepro("7-4", "the root page is stored under Next's cache key /index", async () => {
+    it("[7-4] the root page is stored under Next's cache key /index", async () => {
       const ns = uniqueNamespace();
       await prewarm(ns);
       expect(await client.exists(`${ns}:/index`)).toBe(1);
     });
 
-    itRepro("7-4", "APP_ROUTE outputs (dataRoute null, e.g. /icon) are prewarmed", async () => {
+    it("[7-4] APP_ROUTE outputs (dataRoute null, e.g. /icon) are prewarmed", async () => {
       const ns = uniqueNamespace();
       await prewarm(ns);
       expect(await client.exists(`${ns}:/icon`)).toBe(1);
     });
 
-    itRepro("7-4", "the not-found page is prewarmed and keeps status 404 from its meta", async () => {
+    it("[7-4] the not-found page is prewarmed and keeps status 404 from its meta", async () => {
       const ns = uniqueNamespace();
       await prewarm(ns);
       const raw = await client.get(`${ns}:/_not-found`);
@@ -133,7 +133,7 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       expect((JSON.parse(raw!) as { value: { status?: number } }).value.status).toBe(404);
     });
 
-    itRepro("7-4", "APP_ROUTE entries keep status and headers from their meta", async () => {
+    it("[7-4] APP_ROUTE entries keep status and headers from their meta", async () => {
       const ns = uniqueNamespace();
       await prewarm(ns);
       const raw = await client.get(`${ns}:/icon`);
@@ -144,7 +144,7 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       expect(value.headers?.["content-type"]).toBe("image/png");
     });
 
-    itRepro("7-4", "a partially prerendered page keeps its postponed state from the meta", async () => {
+    it("[7-4] a partially prerendered page keeps its postponed state from the meta", async () => {
       const root = mkdtempSync(path.join(tmpdir(), "nrc-ppr-"));
       try {
         cpSync(FIXTURE_ROOT, root, { recursive: true });

@@ -47,62 +47,68 @@ interface PrerenderManifest {
 }
 
 interface MetaFile {
+  status?: number;
   headers?: Record<string, string>;
   segmentPaths?: string[];
+  postponed?: string;
 }
 
 // ------------------------------------------------------------------
 // Disk reading helpers
+//
+// Mirrors how Next's FileSystemCache reads prerendered output (next/dist/server/lib/incremental-cache/
+// file-system-cache.js), so a prewarmed entry is the same entry Next would have produced:
+//   APP_PAGE   <key>.html + <key>.meta (status, headers, postponed, segmentPaths) + <key>.rsc (unless
+//              postponed) + <key>.segments<segmentPath>.segment.rsc for every meta segmentPath
+//   APP_ROUTE  <key>.body + <key>.meta (status, headers)
 // ------------------------------------------------------------------
+
+/** Next's cache key for a prerendered route: the root page is stored as "/index". */
+function cacheKeyOf(route: string): string {
+  return route === "/" ? "/index" : route;
+}
+
+async function readFileOrNull(filePath: string): Promise<Buffer | null> {
+  try {
+    return await fs.readFile(filePath);
+  } catch {
+    return null;
+  }
+}
 
 async function readRouteFromDisk(
   appDir: string,
-  route: string,
-  routeInfo: PrerenderManifest["routes"][string]
+  cacheKey: string
 ): Promise<Record<string, unknown> | null> {
-  const basePath = path.join(appDir, route);
-  const isAppRoute = routeInfo.dataRoute === null;
-  const isRscRoute = routeInfo.dataRoute?.endsWith(".rsc");
+  const basePath = path.join(appDir, cacheKey);
 
-  if (isRscRoute) {
-    const htmlPath = basePath + ".html";
-    const rscPath = basePath + ".rsc";
-    const [htmlExists, rscExists] = await Promise.all([
-      fs.stat(htmlPath).catch(() => null),
-      fs.stat(rscPath).catch(() => null),
-    ]);
-    if (!htmlExists || !rscExists) return null;
-
-    const [html, rscData, segmentData] = await Promise.all([
-      fs.readFile(htmlPath, "utf-8"),
-      fs.readFile(rscPath),
-      readSegmentData(basePath + ".segments"),
-    ]);
+  const html = await readFileOrNull(basePath + ".html");
+  if (html) {
     const meta = await readMeta(basePath + ".meta");
+    const postponed = meta?.postponed;
+    // Like Next: a partially prerendered page (postponed state) is served without the full RSC payload
+    const rscData =
+      postponed == null ? await readFileOrNull(basePath + ".rsc") : undefined;
+    if (postponed == null && !rscData) return null;
 
     return {
       kind: "APP_PAGE",
-      html,
-      rscData,
+      html: html.toString("utf-8"),
+      rscData: rscData ?? undefined,
       headers: meta?.headers,
-      postponed: undefined,
-      status: undefined,
-      segmentData,
+      postponed,
+      status: meta?.status,
+      segmentData: await readSegmentData(basePath + ".segments", meta?.segmentPaths),
     };
   }
 
-  if (isAppRoute) {
-    const bodyPath = basePath + ".body";
-    const bodyExists = await fs.stat(bodyPath).catch(() => null);
-    if (!bodyExists) return null;
-
-    const body = await fs.readFile(bodyPath);
+  const body = await readFileOrNull(basePath + ".body");
+  if (body) {
     const meta = await readMeta(basePath + ".meta");
-
     return {
       kind: "APP_ROUTE",
       body,
-      status: 200,
+      status: meta?.status ?? 200,
       headers: meta?.headers ?? {},
     };
   }
@@ -110,37 +116,22 @@ async function readRouteFromDisk(
   return null;
 }
 
+/**
+ * Segment prefetch data keyed exactly like Next's cache entries: by the meta's segmentPaths
+ * ("/_tree", "/about/__PAGE__"). Pages without segmentPaths have no segment data.
+ */
 async function readSegmentData(
-  segmentsDir: string
+  segmentsDir: string,
+  segmentPaths: string[] | undefined
 ): Promise<Map<string, Buffer> | undefined> {
-  try {
-    const entries = await fs.readdir(segmentsDir, { withFileTypes: true });
-    const segmentFiles = entries.filter(
-      (e) => e.isFile() && e.name.endsWith(".segment.rsc")
-    );
-    if (segmentFiles.length === 0) return undefined;
-
-    const map = new Map<string, Buffer>();
-    for (const file of segmentFiles) {
-      const data = await fs.readFile(path.join(segmentsDir, file.name));
-      const key = file.name.replace(/\.segment\.rsc$/, "");
-      map.set(key, data);
-    }
-
-    const dirs = entries.filter((e) => e.isDirectory());
-    for (const dir of dirs) {
-      const sub = await readSegmentData(path.join(segmentsDir, dir.name));
-      if (sub) {
-        for (const [key, val] of sub) {
-          map.set(`${dir.name}/${key}`, val);
-        }
-      }
-    }
-
-    return map.size > 0 ? map : undefined;
-  } catch {
-    return undefined;
+  if (!segmentPaths) return undefined;
+  const map = new Map<string, Buffer>();
+  for (const segmentPath of segmentPaths) {
+    const data = await readFileOrNull(segmentsDir + segmentPath + ".segment.rsc");
+    // A missing segment file is treated like Next does: that segment has no prefetch data
+    if (data) map.set(segmentPath, data);
   }
+  return map;
 }
 
 async function readMeta(metaPath: string): Promise<MetaFile | null> {
@@ -203,15 +194,16 @@ export async function registerInitialCache(
   const appDir = path.join(serverDistDir, "app");
   let prewarmed = 0;
 
+  // Every prerendered App Router output: pages (including "/" as "/index" and "/_not-found") and
+  // route handlers (dataRoute null, e.g. /icon). Routes without App Router output on disk (Pages
+  // Router) are skipped.
   for (const [route, routeInfo] of Object.entries(manifest.routes)) {
-    if (route.startsWith("/_")) continue;
-    if (!routeInfo.dataRoute) continue;
-
+    const cacheKey = cacheKeyOf(route);
     try {
-      const value = await readRouteFromDisk(appDir, route, routeInfo);
+      const value = await readRouteFromDisk(appDir, cacheKey);
       if (!value) continue;
 
-      await handler.set(route, value, {
+      await handler.set(cacheKey, value, {
         revalidate: routeInfo.initialRevalidateSeconds,
         setOnlyIfNotExists: options.setOnlyIfNotExists ?? true,
       });

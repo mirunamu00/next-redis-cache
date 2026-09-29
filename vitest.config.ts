@@ -5,6 +5,8 @@ import { defineConfig } from "vitest/config";
 //   fault           : mini-redis (in-process TCP server), no Docker; Windows included
 //   fault-docker    : toxiproxy from docker/compose.yml (`npm run infra:up`); files named *.docker.test.ts
 //   integration     : real Redis 7.2 / 8.4 through testcontainers; each file starts its own containers
+//   contract        : differential oracle against Next's default "use cache" handler (mini-redis, no Docker)
+//   chaos           : fleet of standalone test-app builds + docker compose Redis/toxiproxy (long-running)
 // Flakiness is never hidden by retries (retry: 0). Unstable tests are fixed or quarantined (@quarantine).
 const isCI = Boolean(process.env.CI);
 
@@ -52,6 +54,25 @@ export default defineConfig({
           include: ["tests/fault/**/*.docker.test.ts"],
           testTimeout: 20_000,
           hookTimeout: 30_000,
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "contract",
+          include: ["tests/contract/oracle/**/*.test.ts"],
+          testTimeout: 60_000,
+        },
+      },
+      {
+        extends: true,
+        test: {
+          name: "chaos",
+          include: ["tests/chaos/**/*.test.ts"],
+          // Fleets and Redis are shared resources: one file at a time, tests in order
+          fileParallelism: false,
+          testTimeout: 180_000,
+          hookTimeout: 240_000,
         },
       },
       {

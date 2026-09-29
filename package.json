@@ -32,7 +32,7 @@
     "dev": "tsup --watch",
     "typecheck": "tsc -p tsconfig.json",
     "lint": "eslint .",
-    "test": "vitest run --project unit --project property",
+    "test": "vitest run --project unit --project property --project contract",
     "test:unit": "vitest run --project unit",
     "test:prop": "vitest run --project property",
     "test:coverage": "vitest run --project unit --project property --coverage",
@@ -57,8 +57,12 @@
     "apps:prepare": "node scripts/prepare-app.mjs",
     "fleet": "node scripts/fleet.mjs",
     "origin": "node scripts/origin-server.mjs",
-    "test:contract": "node scripts/contract-types.mjs --variant all",
-    "test:e2e": "playwright test"
+    "test:contract": "vitest run --project contract && node scripts/contract-types.mjs --variant all",
+    "test:e2e": "playwright test",
+    "test:contract:oracle": "vitest run --project contract",
+    "test:contract:types": "node scripts/contract-types.mjs --variant all",
+    "test:chaos": "vitest run --project chaos",
+    "test:perf": "node scripts/perf.mjs --check"
   },
   "peerDependencies": {
     "@redis/client": ">=5.0.0",
@@ -74,6 +78,7 @@
     "@size-limit/file": "^14.1.0",
     "@types/node": "^22.0.0",
     "@vitest/coverage-v8": "^5.0.2",
+    "autocannon": "^8.0.0",
     "eslint": "^10.11.0",
     "fast-check": "^4.10.2",
     "globals": "^17.12.0",

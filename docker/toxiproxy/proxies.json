@@ -1,0 +1,14 @@
+[
+  {
+    "name": "redis84",
+    "listen": "0.0.0.0:26384",
+    "upstream": "redis84:6379",
+    "enabled": true
+  },
+  {
+    "name": "prodlike",
+    "listen": "0.0.0.0:26390",
+    "upstream": "prodlike:6379",
+    "enabled": true
+  }
+]

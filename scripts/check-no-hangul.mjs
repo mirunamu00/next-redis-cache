@@ -10,6 +10,7 @@ import { run } from "./lib/run.mjs";
 process.chdir(fileURLToPath(new URL("..", import.meta.url)));
 
 const { status, stdout, stderr } = run("git", ["ls-files", "-z", "--cached", "--others", "--exclude-standard"], {
+  shell: false,
   capture: true,
 });
 if (status !== 0) {

@@ -1,0 +1,77 @@
+# Local and CI test infrastructure (ROADMAP.md section 6.4). Managed through `npm run infra:*`
+# (scripts/infra.mjs); every service sits behind a profile so nothing starts by accident.
+#
+#   profile    service    host port (env override)            purpose
+#   redis84    redis84    6384  (NRC_REDIS84_PORT)            default target, Redis 8.4
+#   redis72    redis72    6372  (NRC_REDIS72_PORT)            lower bound without HEXPIRE, Redis 7.2
+#   prodlike   prodlike   6390  (NRC_PRODLIKE_PORT)           mimics production: AOF + RDB, volatile-lru, maxmemory
+#   toxiproxy  toxiproxy  8474  (NRC_TOXIPROXY_PORT) API      fault injection in front of redis84 / prodlike
+#                         26384 (NRC_TOXI_REDIS84_PORT)       static proxy -> redis84
+#                         26390 (NRC_TOXI_PRODLIKE_PORT)      static proxy -> prodlike
+#                         26400-26415                         per-worker dynamic proxies created by tests
+#   replica    replica    6391  (NRC_REPLICA_PORT)            replica of prodlike (replication shape only, no failover)
+#
+# The password is the test-only dummy "test". Never point tests at a real Redis.
+# Plain bridge networking with port mappings (network_mode: host is not supported on Docker Desktop for Windows).
+name: nrc
+
+services:
+  redis84:
+    image: redis:8.4
+    profiles: [redis84]
+    command: ["redis-server", "--requirepass", "test", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${NRC_REDIS84_PORT:-6384}:6379"
+    healthcheck: &redis-health
+      test: ["CMD", "redis-cli", "-a", "test", "--no-auth-warning", "ping"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+
+  redis72:
+    image: redis:7.2
+    profiles: [redis72]
+    command: ["redis-server", "--requirepass", "test", "--save", "", "--appendonly", "no"]
+    ports:
+      - "${NRC_REDIS72_PORT:-6372}:6379"
+    healthcheck: *redis-health
+
+  prodlike:
+    image: redis:8.4
+    # The replica profile needs a primary, so prodlike also starts with it.
+    profiles: [prodlike, replica]
+    # maxmemory is a command-line argument so chaos tests can switch between 16mb and 384mb.
+    command: ["redis-server", "/usr/local/etc/redis/redis.conf", "--maxmemory", "${NRC_PRODLIKE_MAXMEMORY:-384mb}"]
+    volumes:
+      - ./redis/prodlike.conf:/usr/local/etc/redis/redis.conf:ro
+      - prodlike-data:/data
+    ports:
+      - "${NRC_PRODLIKE_PORT:-6390}:6379"
+    healthcheck: *redis-health
+
+  replica:
+    image: redis:8.4
+    profiles: [replica]
+    command: ["redis-server", "--replicaof", "prodlike", "6379", "--masterauth", "test", "--requirepass", "test", "--save", ""]
+    depends_on:
+      prodlike:
+        condition: service_healthy
+    ports:
+      - "${NRC_REPLICA_PORT:-6391}:6379"
+    healthcheck: *redis-health
+
+  toxiproxy:
+    image: ghcr.io/shopify/toxiproxy:2.12.0
+    profiles: [toxiproxy]
+    command: ["-host", "0.0.0.0", "-config", "/config/proxies.json"]
+    volumes:
+      - ./toxiproxy/proxies.json:/config/proxies.json:ro
+    ports:
+      - "${NRC_TOXIPROXY_PORT:-8474}:8474"
+      - "${NRC_TOXI_REDIS84_PORT:-26384}:26384"
+      - "${NRC_TOXI_PRODLIKE_PORT:-26390}:26390"
+      - "26400-26415:26400-26415"
+    # The image has no shell or curl; readiness is checked by scripts/infra.mjs through the HTTP API.
+
+volumes:
+  prodlike-data:

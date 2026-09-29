@@ -1,14 +1,15 @@
 // Runs every available test layer against local infrastructure:
 //   infra:up (redis84 + toxiproxy) -> all vitest projects -> infra:down (always, unless --keep-infra)
 // Usage: npm run test:all [-- --keep-infra]
-// Layers added in later stages (contract, e2e, chaos, perf) are appended here as they land.
+// Covers every vitest layer except chaos (see PROJECTS).
 import { fileURLToPath } from "node:url";
 import { run } from "./lib/run.mjs";
 
 process.chdir(fileURLToPath(new URL("..", import.meta.url)));
 
 const keepInfra = process.argv.includes("--keep-infra");
-const PROJECTS = ["unit", "property", "fault", "fault-docker", "integration"];
+// e2e, chaos and perf need app builds (scripts/prepare-app.mjs) and run separately (npm run test:e2e / test:chaos / test:perf)
+const PROJECTS = ["unit", "property", "contract", "fault", "fault-docker", "integration"];
 
 let status = run("node", ["scripts/infra.mjs", "up", "redis84", "toxiproxy"], { shell: false }).status;
 if (status === 0) {

@@ -9,12 +9,18 @@ import { defineConfig } from "vitest/config";
 //   chaos           : fleet of standalone test-app builds + docker compose Redis/toxiproxy (long-running)
 // Flakiness is never hidden by retries (retry: 0). Unstable tests are fixed or quarantined (@quarantine).
 const isCI = Boolean(process.env.CI);
+// NRC_BLOB=<name> also writes a blob report (with coverage) to reports/blob/<name>.json; the CI coverage
+// job merges the blobs of unit, integration and fault (vitest --merge-reports) into one report.
+const blob = process.env.NRC_BLOB;
+const reporters: Array<string | [string, Record<string, unknown>]> = ["default"];
+if (isCI) reporters.push(["junit", { outputFile: "reports/junit.xml" }]);
+if (blob) reporters.push(["blob", { outputFile: `reports/blob/${blob}.json` }]);
 
 export default defineConfig({
   test: {
     retry: 0,
     environment: "node",
-    reporters: isCI ? ["default", ["junit", { outputFile: "reports/junit.xml" }]] : ["default"],
+    reporters,
     coverage: {
       provider: "v8",
       include: ["src/**/*.ts"],

@@ -2,7 +2,7 @@
  * Chaos harness (ROADMAP.md section 6.5): fleets of standalone test-app builds, Redis through a
  * per-worker toxiproxy proxy, background traffic and invariant checks.
  *
- * Prerequisites: `npm run infra:up -- redis84 toxiproxy` and the builds
+ * Prerequisites: `npm run infra:up -- redis84 toxiproxy prodlike` (prodlike: C7, C8) and the builds
  *   node scripts/prepare-app.mjs static-site --build A,B
  *   node scripts/prepare-app.mjs full-legacy --build A
  *   node scripts/prepare-app.mjs full-cc --build A

@@ -1,13 +1,12 @@
 // Regressions against real Redis (ROADMAP.md 7-1, 7-5, 7-6, 7-9, 7-11, 7-12, A8), once per Redis version
 // under test. Each asserts the correct behavior; the 7-x tests were expected failures on 1.0.6. `itRepro`
-// marks what is still expected to fail (tests/support/repro.ts).
+// would mark what is still expected to fail (tests/support/repro.ts); none is left.
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { redisVersionsUnderTest, startRedisContainer, type RedisServer } from "../support/redis-container";
 import { connectTestClient, type TestRedisClient, type TrackedClient } from "../support/redis";
 import { uniqueNamespace } from "../support/namespace";
 import { waitFor } from "../support/wait-for";
 import { appPageValue, appRouteValue, fetchValue, legacyHandler, readEntry, testConfig, useCacheEntry, useCacheHandler } from "../support/handlers";
-import { itRepro } from "../support/repro";
 import { cleanupOldBuildKeys } from "../../src/legacy-cleanup";
 import { LegacyCore } from "../../src/legacy-handler";
 import { resolveConfig } from "../../src/config";
@@ -198,13 +197,8 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       expect(deleted).toBe(100);
     });
 
-    itRepro("7-9", "keeps keys of an old build that is still being served (recently accessed)", async () => {
-      const ns = uniqueNamespace();
-      await client.set(`${ns}:A:/page`, "old build, still serving", { expiration: { type: "EX", value: 600 } });
-      await client.get(`${ns}:A:/page`); // an old pod read it just now (rolling update in progress)
-      await cleanupOldBuildKeys({ redisUrl: server.url, patterns: [{ scan: `${ns}:*`, keepPrefix: `${ns}:B:` }] });
-      expect(await client.exists(`${ns}:A:/page`)).toBe(1);
-    });
+    // Keeping a build that is still being read is the job of cleanupOldBuilds (tests/integration/maintenance.test.ts);
+    // the deprecated pattern cleanup deletes whatever the patterns match.
   });
 
   describe("7-11 TTL", () => {

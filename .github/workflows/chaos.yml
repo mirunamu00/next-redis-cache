@@ -50,7 +50,7 @@ jobs:
       - run: npm run build
       - run: node scripts/pack.mjs --no-build
       - name: Start infrastructure
-        run: npm run infra:up -- redis84 toxiproxy
+        run: npm run infra:up -- redis84 toxiproxy prodlike
       - name: Build the test apps (static-site A and B for rolling updates)
         run: |
           node scripts/prepare-app.mjs static-site --variant "$NRC_NEXT_VARIANT" --no-pack --build A,B

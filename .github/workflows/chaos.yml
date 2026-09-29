@@ -1,0 +1,77 @@
+# Chaos layer (ROADMAP.md section 6.5): fleets of standalone test-app builds against docker compose
+# Redis + toxiproxy. Reusable: nightly runs every scenario, release runs the required subset.
+# Known-bug reproductions are expected failures (it.fails), so a green run means "no new breakage".
+name: Chaos
+
+on:
+  workflow_call:
+    inputs:
+      files:
+        description: "vitest file filters (space separated); empty = every chaos file"
+        type: string
+        default: ""
+      variant:
+        description: "Next variant of the test apps"
+        type: string
+        default: next-16.3
+  workflow_dispatch:
+    inputs:
+      files:
+        description: "vitest file filters (space separated); empty = every chaos file"
+        type: string
+        default: ""
+      variant:
+        description: "Next variant of the test apps"
+        type: string
+        default: next-16.3
+
+permissions:
+  contents: read
+
+jobs:
+  chaos:
+    name: chaos (${{ inputs.files || 'all' }}, ${{ inputs.variant }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      NRC_NEXT_VARIANT: ${{ inputs.variant }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            test-apps/_variants/*/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/pack.mjs --no-build
+      - name: Start infrastructure
+        run: npm run infra:up -- redis84 toxiproxy
+      - name: Build the test apps (static-site A and B for rolling updates)
+        run: |
+          node scripts/prepare-app.mjs static-site --variant "$NRC_NEXT_VARIANT" --no-pack --build A,B
+          node scripts/prepare-app.mjs full-legacy --variant "$NRC_NEXT_VARIANT" --no-pack --build A
+          node scripts/prepare-app.mjs full-cc --variant "$NRC_NEXT_VARIANT" --no-pack --build A
+      - name: Chaos scenarios
+        run: npx vitest run --project chaos ${{ inputs.files }}
+      - name: Summary
+        if: always()
+        run: node scripts/junit-summary.mjs "chaos (${{ inputs.files || 'all' }})" reports/junit.xml
+      - name: Infrastructure logs
+        if: failure()
+        run: npm run infra:logs
+      - name: Stop infrastructure
+        if: always()
+        run: npm run infra:down
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: chaos-${{ inputs.variant }}${{ inputs.files && '-subset' || '' }}
+          path: |
+            reports/
+            .work/logs/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14

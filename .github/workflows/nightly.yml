@@ -1,0 +1,182 @@
+# Nightly / weekly (ROADMAP.md section 6.8)
+#
+#   daily   ci level=full (e2e [16.1, 16.3] x [7.2, 8.4], contract + canary) + every chaos scenario
+#           + perf with timing + quarantined tests x20 + e2e on Node 24
+#   weekly  + mutation (Stryker, report-only until 2.0.0) + canary e2e (allowed to fail, Q15)
+#   failure of a scheduled run opens or updates an issue labelled nightly-failure
+#
+# Schedules only run on the default branch. To validate changes to this file (or chaos.yml) before
+# merging, a push to a feat/** branch that touches them runs the whole workflow once, weekly jobs
+# included; no issue is filed for those runs.
+name: Nightly
+
+on:
+  schedule:
+    - cron: "17 18 * * *" # daily 03:17 KST
+    - cron: "41 19 * * 0" # weekly, Monday 04:41 KST
+  workflow_dispatch:
+    inputs:
+      weekly:
+        description: "Also run the weekly jobs (mutation, canary e2e)"
+        type: boolean
+        default: false
+  push:
+    branches: ["feat/**"]
+    paths:
+      - .github/workflows/nightly.yml
+      - .github/workflows/chaos.yml
+
+permissions:
+  contents: read
+
+jobs:
+  ci-full:
+    name: ci (level full)
+    uses: ./.github/workflows/ci.yml
+    with:
+      level: full
+
+  chaos:
+    name: chaos (all scenarios)
+    uses: ./.github/workflows/chaos.yml
+
+  quarantine:
+    name: quarantined tests x20
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Quarantine register
+        run: node scripts/check-quarantine.mjs
+      - name: Quarantined vitest tests (docker-free layers), 20 repeats each
+        env:
+          NRC_QUARANTINE: only
+        run: npx vitest run --project unit --project property --project contract --project fault --passWithNoTests
+      # e2e quarantine (Playwright @quarantine, --repeat-each=20) is added here once an e2e test is quarantined
+
+  e2e-node24:
+    name: e2e on Node 24 (${{ matrix.app }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [static-site, full-legacy, full-cc]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            test-apps/_variants/*/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/pack.mjs --no-build
+      - run: npm run infra:up -- redis84 toxiproxy
+      - run: node scripts/prepare-app.mjs ${{ matrix.app }} --no-pack --build A
+      - run: npx playwright test --project ${{ matrix.app }}
+      - if: always()
+        run: node scripts/junit-summary.mjs "e2e Node 24 (${{ matrix.app }})" reports/e2e-junit.xml
+      - if: always()
+        run: npm run infra:down
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: e2e-node24-${{ matrix.app }}
+          path: |
+            reports/
+            test-results/
+            .work/logs/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
+
+  mutation:
+    name: mutation (weekly)
+    if: github.event_name == 'push' || github.event.schedule == '41 19 * * 0' || inputs.weekly
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: Stryker (report-only until 2.0.0)
+        run: npm run test:mutation
+      - if: always()
+        run: node scripts/mutation-summary.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutation
+          path: reports/mutation/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  canary:
+    name: canary e2e (weekly, allowed to fail)
+    if: github.event_name == 'push' || github.event.schedule == '41 19 * * 0' || inputs.weekly
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      outcome: ${{ steps.e2e.outcome }}
+    env:
+      NRC_NEXT_VARIANT: canary
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - run: node scripts/pack.mjs --no-build
+      - run: npm run infra:up -- redis84 toxiproxy
+      - name: Build and test every app on Next canary
+        id: e2e
+        continue-on-error: true
+        run: |
+          node scripts/prepare-app.mjs all --variant canary --no-pack --build A
+          npx playwright test
+      - if: always()
+        run: node scripts/junit-summary.mjs "e2e Next canary" reports/e2e-junit.xml
+      - if: always()
+        run: npm run infra:down
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: e2e-canary
+          path: |
+            reports/
+            test-results/
+            .work/logs/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
+
+  report:
+    name: report failures
+    needs: [ci-full, chaos, quarantine, e2e-node24, mutation, canary]
+    if: always() && github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Open or update the nightly-failure issue
+        if: contains(needs.*.result, 'failure') || contains(needs.*.result, 'cancelled') || needs.canary.outputs.outcome == 'failure'
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          NEEDS: ${{ toJSON(needs) }}
+        run: node scripts/nightly-issue.mjs "$(node -e 'const n=JSON.parse(process.env.NEEDS);console.log(Object.entries(n).map(([k,v])=>k+"="+v.result+(k==="canary"&&v.outputs.outcome?"("+v.outputs.outcome+")":"")).join(", "))')"

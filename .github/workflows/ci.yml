@@ -1,15 +1,16 @@
 # CI - quality gate (ROADMAP.md section 6.8)
 #
-# Job graph (P0c):
-#   static (no-hangul, lint, typecheck, build, quality) --+
-#   unit (Node 22, 24)                                    |
-#   unit-windows (layers that need no Docker)             |
-#   integration (Redis 7.2, 8.4 via testcontainers)       +-- gate (the only required check for branch protection)
-#   fault (mini-redis + toxiproxy from docker compose)    |
-#   setup (build + npm pack -> tarball artifact)          |
-#     |- contract (tsc per Next variant)                  |
-#     |- e2e (app x Next x Redis, Playwright + fleet)     |
-#     |- perf (deterministic gate vs tests/perf/baseline) -+
+# Job graph (P0e):
+#   static (no-hangul, quarantine, lint, typecheck, build, quality) --+
+#   unit (Node 22, 24)                                                |
+#   unit-windows (layers that need no Docker)                         |
+#   integration (Redis 7.2, 8.4 via testcontainers)                   +-- gate (the only required
+#   fault (mini-redis + toxiproxy from docker compose)                |    check for branch protection)
+#   setup (build + npm pack -> tarball artifact)                      |
+#     |- contract (tsc per Next variant)                              |
+#     |- e2e (app x Next x Redis, Playwright + fleet)                 |
+#     |- perf (deterministic gate vs tests/perf/baseline)           --+
+#   coverage (merges the unit/integration/fault blob reports; report-only, outside the gate)
 #
 # level=pr (push, pull_request): e2e = 3 apps x Next 16.3 x Redis 8.4, contract = 16.1 + 16.3.
 # level=full (workflow_call from nightly/release): e2e = 3 apps x [16.1, 16.3] x [7.2, 8.4], contract + canary
@@ -53,6 +54,8 @@ jobs:
       - run: npm ci
       - name: No Hangul in code
         run: npm run check-no-hangul
+      - name: Quarantined tests have an issue and an unexpired deadline
+        run: node scripts/check-quarantine.mjs
       - run: npm run lint
       - run: npm run typecheck
       - run: npm run build
@@ -75,6 +78,11 @@ jobs:
       - run: npm ci
       - name: Tests (with coverage on Node 22)
         run: ${{ matrix.node == 22 && 'npm run test:coverage' || 'npm test' }}
+        env:
+          NRC_BLOB: ${{ matrix.node == 22 && 'unit' || '' }}
+      - name: Summary
+        if: always()
+        run: node scripts/junit-summary.mjs "unit + property + contract (Node ${{ matrix.node }})" reports/junit.xml
       - name: Coverage summary
         if: matrix.node == 22 && always()
         run: node scripts/coverage-summary.mjs
@@ -121,14 +129,21 @@ jobs:
           cache: npm
       - run: npm ci
       - name: Integration tests (testcontainers)
-        run: npm run test:int
+        run: npm run test:int -- --coverage
         env:
           NRC_REDIS_VERSIONS: ${{ matrix.redis }}
+          NRC_BLOB: integration-${{ matrix.redis }}
+      - name: Summary
+        if: always()
+        run: node scripts/junit-summary.mjs "integration (Redis ${{ matrix.redis }})" reports/junit.xml
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
           name: integration-redis${{ matrix.redis }}
-          path: reports/
+          # two paths keep the artifact rooted at the repository (reports/blob/*.json for the coverage merge)
+          path: |
+            reports/
+            coverage/
           if-no-files-found: ignore
           retention-days: 14
 
@@ -145,7 +160,12 @@ jobs:
       - run: npm ci
       - name: Start infrastructure (redis84 + toxiproxy)
         run: npm run infra:up -- redis84 toxiproxy
-      - run: npm run test:fault
+      - run: npm run test:fault -- --coverage
+        env:
+          NRC_BLOB: fault
+      - name: Summary
+        if: always()
+        run: node scripts/junit-summary.mjs "fault" reports/junit.xml
       - name: Infrastructure logs
         if: failure()
         run: npm run infra:logs
@@ -156,7 +176,40 @@ jobs:
         if: always()
         with:
           name: fault
-          path: reports/
+          path: |
+            reports/
+            coverage/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  coverage:
+    name: coverage (unit + property + contract + integration + fault, report-only)
+    needs: [unit, integration, fault]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: "{unit-node22,integration-redis*,fault}"
+          path: .artifacts/layers
+          merge-multiple: true
+      - name: Merge blob reports (coverage of every docker and docker-free layer)
+        run: npx vitest run --merge-reports .artifacts/layers/reports/blob --coverage
+      - name: Summary
+        if: always()
+        run: node scripts/coverage-summary.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: coverage-merged
+          path: coverage/
           if-no-files-found: ignore
           retention-days: 14
 
@@ -242,6 +295,9 @@ jobs:
         run: node scripts/prepare-app.mjs ${{ matrix.app }} --variant ${{ matrix.variant }} --no-pack --build A
       - name: e2e
         run: npx playwright test --project ${{ matrix.app }}
+      - name: Summary
+        if: always()
+        run: node scripts/junit-summary.mjs "e2e (${{ matrix.app }}, ${{ matrix.variant }}, Redis ${{ matrix.redis }})" reports/e2e-junit.xml
       - name: Infrastructure logs
         if: failure()
         run: npm run infra:logs

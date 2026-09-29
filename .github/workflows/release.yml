@@ -1,3 +1,9 @@
+# Release (changesets). Publishing is gated (ROADMAP.md section 6.8): the release job needs the full CI
+# matrix (ci.yml level=full) and the required chaos subset. A commit that fails either cannot publish.
+#
+# Required chaos subset: startup without Redis (C1, C9) and rolling update/rollback (C11, C12). C3
+# (unresponsive Redis) and C7 (eviction pressure) join the subset when they are implemented.
+# Trusted publishing (OIDC), SHA-pinned actions for the release job and Node 24 come in P1.
 name: Release
 
 on:
@@ -7,9 +13,25 @@ on:
 
 concurrency: ${{ github.workflow }}-${{ github.ref }}
 
+permissions:
+  contents: read
+
 jobs:
+  gate:
+    name: gate (ci level full)
+    uses: ./.github/workflows/ci.yml
+    with:
+      level: full
+
+  chaos:
+    name: gate (chaos subset)
+    uses: ./.github/workflows/chaos.yml
+    with:
+      files: tests/chaos/startup.test.ts tests/chaos/rolling.test.ts
+
   release:
     name: Release
+    needs: [gate, chaos]
     runs-on: ubuntu-latest
     permissions:
       contents: write

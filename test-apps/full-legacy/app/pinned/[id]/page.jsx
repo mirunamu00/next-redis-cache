@@ -5,7 +5,7 @@ import { getDatum } from "../../../lib/data.mjs";
 export const dynamicParams = false;
 
 export function generateStaticParams() {
-  return [{ id: "1" }, { id: "2" }, { id: "3" }];
+  return ["1", "2", "3", "4", "5", "6"].map((id) => ({ id }));
 }
 
 export default async function PinnedPage({ params }) {

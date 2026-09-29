@@ -125,3 +125,28 @@ export async function unhandledTotal(fleet: Fleet): Promise<number> {
 }
 
 export type { APIResponse };
+
+/**
+ * Submits a server-action form the way a browser without JavaScript does: POST the form's hidden
+ * fields (including Next's $ACTION_ID_* marker) as multipart/form-data to the page. No browser needed.
+ */
+export async function submitActionForm(fleet: Fleet, pagePath: string, formId: string) {
+  const html = await (await fleet.request(pagePath)).text();
+  const start = html.indexOf(`id="${formId}"`);
+  const form = start < 0 ? undefined : html.slice(start, html.indexOf("</form>", start));
+  if (!form) throw new Error(`form #${formId} not found on ${pagePath}`);
+  const body = new FormData();
+  for (const m of form.matchAll(/<input([^>]*)>/g)) {
+    const name = /name="([^"]*)"/.exec(m[1]!)?.[1];
+    const value = /value="([^"]*)"/.exec(m[1]!)?.[1] ?? "";
+    if (name) body.append(name.replace(/&amp;/g, "&"), value);
+  }
+  const res = await fleet.request(pagePath, { method: "POST", body, redirect: "manual" });
+  await res.arrayBuffer();
+  return res.status;
+}
+
+/** Marks a Playwright test as a known-bug reproduction (expected to fail until the fix). */
+export function repro(id: string, why: string) {
+  test.fail(process.env.NRC_REPRO !== "show", `[${id}] ${why}`);
+}

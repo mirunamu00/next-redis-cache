@@ -136,8 +136,8 @@ describe("7-3 readiness is checked before a command is sent", () => {
   });
 });
 
-describe("7-7 errors are only logged in debug mode", () => {
-  itRepro("7-7", "a set that times out while Redis hangs is reported through console.warn/error", async () => {
+describe("7-7 errors are reported without debug mode", () => {
+  it("[7-7] a set that times out while Redis hangs is reported through console.warn/error", async () => {
     const m = await mini();
     const c = client(m.url, 50);
     await c.connect();

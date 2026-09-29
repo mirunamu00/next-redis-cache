@@ -10,6 +10,7 @@ import { parseBuffersToStrings, convertStringsToBuffers } from "./buffer-utils";
 import { TagManager } from "./tag-manager";
 import { assertClientReady, runCommand } from "./redis-client";
 import { resolveOptions, type OnCreationHook } from "./types";
+import { ErrorReporter } from "./error-reporter";
 
 // ------------------------------------------------------------------
 // Types aligned with next/dist/server/lib/incremental-cache
@@ -120,6 +121,7 @@ export class LegacyCacheHandler {
   static #estimateExpireAge: (s: number) => number = (s) =>
     Math.floor(s * 1.5);
   static #configured = false;
+  static #reporter = new ErrorReporter("legacy");
 
   /**
    * Register setup hook (called from consumer's cache-handler.mjs at module scope).
@@ -207,6 +209,7 @@ export class LegacyCacheHandler {
 
     try {
       const raw = await runCommand(client, () => client.get(fullKey), t);
+      LegacyCacheHandler.#reporter.success();
 
       if (!raw) {
         log("get", cacheKey, "miss");
@@ -253,6 +256,7 @@ export class LegacyCacheHandler {
       return stored;
     } catch (err) {
       log("get", cacheKey, `error: ${err}`);
+      LegacyCacheHandler.#reporter.failure("get", cacheKey, err);
       return null;
     }
   }
@@ -330,9 +334,11 @@ export class LegacyCacheHandler {
         tm.setTtl(cacheKey, lifespan.expireAt),
       ]);
 
+      LegacyCacheHandler.#reporter.success();
       log("set", cacheKey, "stored");
     } catch (err) {
       log("set", cacheKey, `error: ${err}`);
+      LegacyCacheHandler.#reporter.failure("set", cacheKey, err);
     }
   }
 
@@ -350,9 +356,11 @@ export class LegacyCacheHandler {
     for (const t of tags) {
       try {
         await tm.revalidateTag(t);
+        LegacyCacheHandler.#reporter.success();
         log("revalidateTag", t, "done");
       } catch (err) {
         log("revalidateTag", t, `error: ${err}`);
+        LegacyCacheHandler.#reporter.failure("revalidateTag", t, err);
       }
     }
   }

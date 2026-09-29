@@ -8,6 +8,7 @@
 import { streamToBuffer, bufferToStream } from "./stream-utils";
 import { TagManager } from "./tag-manager";
 import { runCommand } from "./redis-client";
+import { ErrorReporter } from "./error-reporter";
 import { resolveOptions, type UseCacheHandlerOptions } from "./types";
 
 // ------------------------------------------------------------------
@@ -68,6 +69,7 @@ export function createUseCacheHandler(
   const keyPrefix = opts.useCacheKeyPrefix ?? `uc:${resolved.keyPrefix}`;
   const timeoutMs = resolved.timeoutMs;
   const tagManager = new TagManager(resolved);
+  const reporter = new ErrorReporter("use-cache");
 
   // Track pending set operations so concurrent gets can wait
   const pendingSets = new Map<string, Promise<void>>();
@@ -90,6 +92,7 @@ export function createUseCacheHandler(
         }
 
         const raw = await exec(() => client.get(keyPrefix + cacheKey));
+        reporter.success();
 
         if (!raw) {
           log("get", cacheKey, "miss");
@@ -139,6 +142,7 @@ export function createUseCacheHandler(
         };
       } catch (err) {
         log("get", cacheKey, `error: ${err}`);
+        reporter.failure("get", cacheKey, err);
         return undefined;
       }
     },
@@ -186,9 +190,11 @@ export function createUseCacheHandler(
 
         await exec(() => client.set(fullKey, serialized, { EX: ttlSeconds }));
 
+        reporter.success();
         log("set", cacheKey, `done (${buffer.byteLength} bytes)`);
       } catch (err) {
         log("set", cacheKey, `error: ${err}`);
+        reporter.failure("set", cacheKey, err);
       } finally {
         resolvePending();
         pendingSets.delete(cacheKey);
@@ -203,9 +209,12 @@ export function createUseCacheHandler(
 
     async getExpiration(tags: string[]): Promise<number> {
       try {
-        return await tagManager.getTagExpiration(tags);
+        const expiration = await tagManager.getTagExpiration(tags);
+        reporter.success();
+        return expiration;
       } catch (err) {
         log("getExpiration", "-", `error: ${err}`);
+        reporter.failure("getExpiration", tags.join(","), err);
         return 0;
       }
     },
@@ -216,9 +225,11 @@ export function createUseCacheHandler(
     ): Promise<void> {
       try {
         await tagManager.updateTagTimestamps(tags, durations);
+        reporter.success();
         log("updateTags", tags.join(","), "done");
       } catch (err) {
         log("updateTags", tags.join(","), `error: ${err}`);
+        reporter.failure("updateTags", tags.join(","), err);
       }
     },
   };

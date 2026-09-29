@@ -51,7 +51,7 @@ describe("7-7 error reporting", () => {
     info: vi.spyOn(console, "info").mockImplementation(() => {}),
   });
 
-  itRepro("7-7", "use-cache: an outage is warned about once (not per request) and the recovery is reported", async () => {
+  it("[7-7] use-cache: an outage is warned about once (not per request) and the recovery is reported", async () => {
     const { client } = recordingClient();
     const { warn, info } = consoleSpies();
     const handler = createUseCacheHandler({ client: client as never, keyPrefix: "t:" });
@@ -65,7 +65,7 @@ describe("7-7 error reporting", () => {
     expect(String(info.mock.calls[0]?.[0])).toMatch(/recovered/);
   });
 
-  itRepro("7-7", "legacy: failing sets are warned about once until Redis recovers", async () => {
+  it("[7-7] legacy: failing sets are warned about once until Redis recovers", async () => {
     const { client } = recordingClient();
     const { warn, info } = consoleSpies();
     const { handler } = await freshLegacy({ client: client as never, keyPrefix: "t:" });

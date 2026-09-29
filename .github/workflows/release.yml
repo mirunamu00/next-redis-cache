@@ -20,10 +20,14 @@
 # when NPM_TOKEN is unset.
 name: Release
 
+# Prereleases (Q11): the `next` branch runs the same flow in changesets pre mode (.changeset/pre.json from
+# `changeset pre enter next`, committed on `next` only): versions 2.0.0-next.N with the npm dist-tag "next".
+# master stays out of pre mode and can still release 1.x hotfixes.
 on:
   push:
     branches:
       - master
+      - next
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

@@ -12,9 +12,21 @@ export const legacyContext = (serverDistDir?: string) => ({ revalidatedTags: [] 
 
 type TestConfig<C> = Omit<C, "namespace"> & { namespace?: string };
 
-/** Defaults for tests: unique namespace, fixed build id, fallback off, enabled even if NEXT_PHASE leaks in. */
+/**
+ * Defaults for tests: unique namespace, fixed build id, fallback off, enabled even if NEXT_PHASE leaks in,
+ * generous timeouts and no circuit breaker - a slow machine must not open a circuit shared by every test of
+ * a file (tests of timeouts and the circuit set them explicitly).
+ */
 export function testConfig<C extends RedisCacheConfig>(config: TestConfig<C>): C {
-  return { namespace: uniqueNamespace(), buildId: "b1", fallback: false, disabled: false, ...config } as C;
+  return {
+    namespace: uniqueNamespace(),
+    buildId: "b1",
+    fallback: false,
+    disabled: false,
+    timeouts: { readMs: 10_000, writeMs: 10_000 },
+    circuitBreaker: false,
+    ...config,
+  } as C;
 }
 
 /** A legacy handler instance (a new class per call: nothing is shared between tests). */

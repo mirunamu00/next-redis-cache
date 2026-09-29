@@ -147,13 +147,16 @@ describe("use-cache handler vs Next's default handler", () => {
   // 2.0 tag state (P2): Next serves an older entry stale once (revalidate -1) where 1.x misses, and Next's
   // default getExpiration returns the future `expired` time for such tags, so it discards soft-tagged
   // entries written after the update where 1.x hits.
+  // A fixed program, not a random one: after the 1.1.0 fix the remaining difference is narrow, so random
+  // programs only find it sometimes and the expected failure would be flaky.
   itRepro("7-1", "agrees when tags are revalidated with durations (revalidateTag(tag, profile))", async () => {
-    await fc.assert(
-      fc.asyncProperty(program(true), async (ops) => {
-        const { reference, ours } = await differential(ops);
-        expect(ours).toEqual(reference);
-      }),
-      { numRuns: 60 },
-    );
+    const ops: Op[] = [
+      { op: "set", key: "k0", tags: ["t0"], revalidate: 100, expireFactor: 10 },
+      { op: "advance", ms: 1_000 },
+      { op: "updateTags", tags: ["t0"], expire: 60 },
+      { op: "get", key: "k0", softTags: [] },
+    ];
+    const { reference, ours } = await differential(ops);
+    expect(ours).toEqual(reference);
   });
 });

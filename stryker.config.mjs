@@ -18,7 +18,7 @@ export default {
   timeoutMS: 60_000,
   concurrency: 4,
   // The sandbox copy only needs sources, tests and configs
-  ignorePatterns: [".work", ".artifacts", "test-results", "reports", "coverage", "test-apps", "docker", "dist", "playwright-report"],
+  ignorePatterns: [".work", ".artifacts", "test-results", "reports", "coverage", "test-apps", "docker", "dist", "playwright-report", "!tests/fixtures/next-build/.next/**"],
   tempDirName: ".work/stryker-tmp",
   cleanTempDir: "always",
 };

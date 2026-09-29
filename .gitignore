@@ -1,5 +1,14 @@
 node_modules/
 dist/
 *.tsbuildinfo
-test-app/.next/
-test-app/cache-debug.log
+
+# Test outputs
+coverage/
+reports/
+playwright-report/
+test-results/
+
+# Test environment assembly (scripts/pack.mjs, scripts/prepare-app.mjs)
+.artifacts/
+.work/
+*.tgz

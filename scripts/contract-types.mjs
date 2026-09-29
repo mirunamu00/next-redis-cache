@@ -10,7 +10,9 @@ import path from "node:path";
 import { parseArgs } from "node:util";
 import { installDependencies, installPackage, verifySingleInstances } from "./prepare-app.mjs";
 import { run } from "./lib/run.mjs";
-import { REPO_ROOT, VARIANTS, WORK_DIR, assertVariant, copyDir, rmrf } from "./lib/work.mjs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { readmeFiles } from "./lib/readme-blocks.mjs";
+import { REPO_ROOT, VARIANTS, WORK_DIR, assertVariant, copyDir, rmrf, writeJson } from "./lib/work.mjs";
 
 const { values } = parseArgs({
   options: {
@@ -19,6 +21,42 @@ const { values } = parseArgs({
     "no-pack": { type: "boolean", default: false },
   },
 });
+
+/**
+ * Type-checks the README's complete-file code blocks as a consumer project (bundler resolution like a
+ * Next.js app, JS checked through checkJs). Node types come from the repository (the variants have none).
+ */
+function checkReadme(dir) {
+  const files = readmeFiles(readFileSync(path.join(REPO_ROOT, "README.md"), "utf8"));
+  if (files.length === 0) {
+    console.error("[contract-types] README: no complete-file code blocks found");
+    return 1;
+  }
+  const out = path.join(dir, "contract-readme");
+  rmrf(out);
+  for (const { file, code } of files) {
+    mkdirSync(path.dirname(path.join(out, file)), { recursive: true });
+    writeFileSync(path.join(out, file), code);
+  }
+  writeJson(path.join(out, "tsconfig.json"), {
+    compilerOptions: {
+      target: "ES2022",
+      module: "ESNext",
+      moduleResolution: "bundler",
+      lib: ["ES2022", "DOM"],
+      strict: true,
+      allowJs: true,
+      checkJs: true,
+      noEmit: true,
+      skipLibCheck: true,
+      typeRoots: [path.join(REPO_ROOT, "node_modules", "@types")],
+      types: ["node"],
+    },
+    include: files.map((f) => f.file),
+  });
+  console.log(`[contract-types] README: type-checking ${files.map((f) => f.file).join(", ")}`);
+  return run(process.execPath, [tsc, "-p", path.join(out, "tsconfig.json")], { shell: false }).status;
+}
 
 const variants = values.variant === "all" ? VARIANTS.filter((v) => v !== "canary") : values.variant.split(",");
 const tsc = path.join(REPO_ROOT, "node_modules", "typescript", "bin", "tsc");
@@ -43,9 +81,20 @@ for (const variant of variants) {
   copyDir(path.join(REPO_ROOT, "tests", "contract", "runtime"), runtime);
   const fixture = path.join(REPO_ROOT, "tests", "fixtures", "next-build", ".next", "server");
   const runtimeStatus = run(process.execPath, [path.join(runtime, "fallback.contract.mjs"), fixture], { shell: false, cwd: dir }).status;
-  results.push({ variant, next: versions.next, ok: status === 0 && runtimeStatus === 0, types: status === 0, runtime: runtimeStatus === 0 });
+  const readmeStatus = checkReadme(dir);
+  results.push({
+    variant,
+    next: versions.next,
+    ok: status === 0 && runtimeStatus === 0 && readmeStatus === 0,
+    types: status === 0,
+    runtime: runtimeStatus === 0,
+    readme: readmeStatus === 0,
+  });
 }
 
 console.log("\n[contract-types] summary");
-for (const r of results) console.log(`  ${r.ok ? "PASS" : "FAIL"}  ${r.variant} (next ${r.next}, package ${values.pkg}; types ${r.types ? "ok" : "FAIL"}, runtime ${r.runtime ? "ok" : "FAIL"})`);
+for (const r of results) {
+  const part = (name, ok) => `${name} ${ok ? "ok" : "FAIL"}`;
+  console.log(`  ${r.ok ? "PASS" : "FAIL"}  ${r.variant} (next ${r.next}, package ${values.pkg}; ${part("types", r.types)}, ${part("runtime", r.runtime)}, ${part("readme", r.readme)})`);
+}
 process.exit(results.every((r) => r.ok) ? 0 : 1);

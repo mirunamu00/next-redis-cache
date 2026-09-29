@@ -4,7 +4,7 @@
 npm 게시물에는 포함되지 않는다(`package.json`의 `files`는 `dist`만 — `scripts/check-pack.mjs`가 강제).
 
 - 작성: 2026-09-29 (1.0.6 기준 감사 → 계획 → 테스트 환경 재설계를 합친 것)
-- 대상 버전: 1.0.6(현재) → 1.1.0(핫픽스) → 2.0.0
+- 대상 버전: 1.0.6(게시본) → 1.1.0(핫픽스, 게시 준비 완료 — 11절) → 2.0.0
 - 레퍼런스 소비자: `mirunamu-cluster/docs` 앱(docs.mirunamu.info). 단, **모든 검증은 이 레포 안의 테스트 환경에서** 하고 docs는 롤아웃 스모크만 맡는다.
 
 ---
@@ -329,7 +329,8 @@ next-redis-cache/
 
 - 커버리지(v8, unit+property+integration+fault 병합, `src/**`): lines 90 / branches 85 / functions 90, 파일별 lines ≥80 — **2.0.0 전까지 리포트만, 2.0.0부터 차단**.
 - `tsc --noEmit`(strict) + contract-types, `publint`, `attw --profile node16`(조건별 types 오류 0), `check-pack` 화이트리스트, `check-no-hangul`, size 예산(엔트리별 ESM gzip, 초기 측정치 +20%), eslint 0 오류, mutation ≥70%(2.0.0부터 차단).
-  - P0a 실제값: attw는 P1(조건별 types 교정) 전까지 `false-esm` 규칙만 무시. size-limit은 `@size-limit/file`로 엔트리 파일+공유 청크의 gzip 크기를 잰다(dist가 minify되지 않으므로 "min+gz"가 아니라 배포물 그대로의 gz). 1.0.6 기준 `.` 4.12kB→예산 5kB, `./use-cache` 3.14kB→3.8kB, `./instrumentation` 1.69kB→2.1kB, CJS 합계 7.5kB→9kB. 별도 `size.mjs` 없이 `.size-limit.json`만 둔다.
+  - P0a 실제값: attw는 P1(조건별 types 교정) 전까지 `false-esm` 규칙만 무시 — **P1에서 예외 제거**(exports 조건별 `{types, default}`, attw `--profile node16` 예외 없이 통과). size-limit은 `@size-limit/file`로 엔트리 파일+공유 청크의 gzip 크기를 잰다(dist가 minify되지 않으므로 "min+gz"가 아니라 배포물 그대로의 gz). 1.0.6 기준 `.` 4.12kB→예산 5kB, `./use-cache` 3.14kB→3.8kB, `./instrumentation` 1.69kB→2.1kB, CJS 합계 7.5kB→9kB. 별도 `size.mjs` 없이 `.size-limit.json`만 둔다.
+  - P1 재설정(같은 +20% 규칙, 1.1.0 산출물 기준): `.` 5.47kB→6.6kB, `./use-cache` 4.5kB→5.4kB, `./instrumentation` 1.71kB→2.1kB(유지), CJS 8.99kB→10.8kB.
   - 커버리지는 P0a/P0b 시점 CI에서 unit+property만 수집. integration·fault 병합은 P0e(리포팅)에서.
 - flaky: 재시도 금지(`retry:0`, Playwright `retries:0`). 불안정 테스트는 `@quarantine` 태그로 게이트 제외 + 추적 이슈 + 7일 내 수정/삭제, nightly `--repeat-each=20`.
   - 구현(P0e): vitest는 `itQuarantine("#<이슈> until YYYY-MM-DD", name, fn)`(`tests/support/quarantine.ts`) — 평소 skip, `NRC_QUARANTINE=only`면 그것만 `repeats: 20`. Playwright는 제목에 `@quarantine(#<이슈> until YYYY-MM-DD)`, config가 평소 `grepInvert`, `NRC_QUARANTINE=only`면 `grep`. `scripts/check-quarantine.mjs`(CI static)가 이슈 번호·기한 형식, 기한 경과, 7일 초과를 실패시킨다(음성 시험: 지난 기한·형식 위반 주입 시 exit 1 확인). nightly `quarantine` job이 x20 반복.
@@ -378,6 +379,11 @@ setup(매트릭스 계산, pack → tgz artifact)          [P0c~]
 - 예산: PR ≤15분, full/nightly ≤60분, weekly mutation ≤90분.
 - 보안: Action SHA 고정, 기본 `permissions: contents: read`, release job만 `id-token: write`·`contents`·`pull-requests: write`.
 - **trusted publishing(OIDC) 전환**: ① (사용자, npmjs.com) 패키지 Settings → Trusted Publisher → GitHub Actions, owner `mirunamu00`, repo `next-redis-cache`, workflow `release.yml`(environment 선택) ② 워크플로 Node 24 또는 npm ≥11.5.1, `id-token: write`, `NODE_AUTH_TOKEN` 제거 ③ 1.1.0 실게시로 검증 ④ (사용자) "Require 2FA and disallow tokens", `NPM_TOKEN` 시크릿·토큰 폐기. 리스크(추측): changesets/action의 `.npmrc` 처리와 `setup-node registry-url`의 빈 토큰이 OIDC와 충돌하는지 — 첫 게시는 프리릴리스로 시험.
+  - **P1 조사 결과(확정)** — 11절에 명령 전문.
+    - ①은 CLI로도 된다: `npm trust github`(npm **≥11.15.0**; 12.x는 Node ^22.22.2 요구라 로컬 Node 22.21에서는 `npx npm@11.20.0`). 계정 2FA 필수, **2FA 우회 granular 토큰·아이디/비번 인증으로는 불가**(대화형 로그인 + OTP 필요). 패키지당 설정 1개(바꾸려면 `npm trust list` → `revoke` → 재생성). `--dry-run` 출력 확인: `{package, file: release.yml, repository: mirunamu00/next-redis-cache, permissions: [createPackage]}`.
+    - ②의 리스크는 해소: changesets/action **v1.7.0+**는 `NPM_TOKEN` env가 없고 OIDC env(`ACTIONS_ID_TOKEN_REQUEST_*`)가 있으면 `.npmrc`를 만들지 않고 신뢰 게시 경로를 탄다(v1.9.0 소스 확인). setup-node에는 `registry-url`을 주지 않는다(주면 `NODE_AUTH_TOKEN` 자리표시 `.npmrc`가 생김). `changeset publish`는 CI에서 OTP·`npm profile` 검사를 건너뛰고 `npm publish <dir> --json --access public --tag latest`를 부른다. changesets/action **v2는 Changesets CLI v3 전용**이라 v1.9.0에 고정.
+    - provenance: 신뢰 게시는 자동 생성, `NPM_CONFIG_PROVENANCE=true`로 명시. 검증 조건인 `package.json repository.url`을 P1에서 추가했다(없으면 E422).
+    - ③ 1.1.0 실게시는 아직(이 브랜치는 master 아님). NPM_TOKEN 시크릿은 만료 추정, 여기서 갱신 불가(gh·GitHub 토큰 없음) → 11절 대안 절차.
 - 프리릴리스: `next` 브랜치에서 `changeset pre enter next` → `2.0.0-next.N`(dist-tag `next`), 안정화 전 `pre exit`.
 - **P0c~P0e 구현(확정, 계획 대비 차이 포함)**
   - 트리거: `push`에 `feat/**` 추가(PR 없이 기능 브랜치 검증, gh CLI 없음). `pull_request`·`master`·`next`는 그대로.
@@ -386,7 +392,8 @@ setup(매트릭스 계산, pack → tgz artifact)          [P0c~]
   - Playwright 브라우저 설치 없음(서버 액션도 폼 제출로 검증). 브라우저가 필요한 테스트가 생기면 그 job에 `npx playwright install --with-deps chromium` 추가.
   - `chaos.yml`: 재사용 워크플로(`workflow_call`·`workflow_dispatch`, 입력 `files`·`variant`). 앱 빌드(static-site A·B, full-legacy A, full-cc A) 후 `vitest --project chaos`.
   - `nightly.yml`: 매일 03:17 KST — ci level=full + chaos 전체 + quarantine x20 + e2e Node 24(3앱). 매주 월 04:41 KST — + mutation + canary e2e(단일 job, 테스트 단계 `continue-on-error` 후 outcome을 report가 읽음). schedule 실행 실패(또는 canary 실패) 시 `scripts/nightly-issue.mjs`가 `nightly-failure` 라벨 이슈를 열거나 댓글을 단다. **schedule은 기본 브랜치에서만 돌므로**, `feat/**`에 nightly.yml·chaos.yml을 바꾸는 push가 있으면 주간 job까지 전부 1회 돈다(이슈는 안 연다).
-  - `release.yml`: `gate`(ci.yml level=full) + `chaos`(필수 부분집합: `startup.test.ts` C1·C9, `rolling.test.ts` C11·C12) → `release`가 `needs: [gate, chaos]`. 계획의 C3(무응답)·C7(축출)은 해당 시나리오가 생기는 단계(P3·P6)에서 부분집합에 추가. 게시 방식(NPM_TOKEN, 태그 참조 액션, Node 20)은 P1에서 OIDC·SHA 고정·Node 24로 바꾼다.
+  - `release.yml`: `gate`(ci.yml level=full) + `chaos`(필수 부분집합: `startup.test.ts` C1·C9, `rolling.test.ts` C11·C12) → `release`가 `needs: [gate, chaos]`. 계획의 C3(무응답)·C7(축출)은 해당 시나리오가 생기는 단계(P3·P6)에서 부분집합에 추가. 게시 방식(NPM_TOKEN, 태그 참조 액션, Node 20)은 P1에서 OIDC·SHA 고정·Node 24로 바꿨다(release job: checkout v7.0.1·setup-node v7.0.0·changesets/action v1.9.0 SHA 고정, Node 24 + `npm@11.20.0`, 토큰 없음, `id-token: write`는 release job만, 포크에서는 미실행).
+  - P1: ci.yml integration 매트릭스에 `@redis/client 6` 셀(Redis 8.4, `npm i --no-save @redis/client@6` 후 typecheck + integration 전체). 셀 이름 `integration (Redis x, @redis/client lock|6)`, blob·artifact 이름에 client 포함(병합 커버리지 충돌 방지). fault·oracle은 6 셀에서 제외 — mini-redis는 RESP2 전용이고 6은 `HELLO 3`으로 시작한다.
   - 워크플로 정적 검사: `docker run --rm -v <repo>:/repo -w /repo rhysd/actionlint`(로컬, 설치 불필요). 기존 gate의 `node -e` 따옴표 info 1건 외 지적 없음.
 
 ### 6.9 회귀 매핑 (1.0.6에서 먼저 실패)
@@ -428,6 +435,26 @@ docs에서 이관된 검증: `prod-cache.spec.ts`(Redis 없이 200) → static-s
 | 7-13 | unit 4건 | 기본 use-cache 키가 `uc:app:b1:…`(keyPrefix 밖), README `cacheLife("hours")` 주석 stale 3600(실제 300), Security 절 없음, "모든 Redis 호출 타임아웃" 주장 |
 | A2 | e2e static-site 1건 | 빈 Redis(프리워밍 없음)에서 `dynamicParams=false` docs 404 |
 
+**P1(1.1.0) 전환 현황** — 수정 커밋마다 표식을 지웠다(`itRepro`→`it`, `repro()` 삭제). P1에서 새로 쓴 재현(7-1 치유·7-4 APP_ROUTE 메타·postponed·7-7 전이·7-9 패턴 중복)은 먼저 1.0.6에서 실패하는 것을 확인하고 커밋(262618f)했다.
+
+| ID | 전환(일반 테스트가 됨) | 남은 재현(단계) |
+|---|---|---|
+| 7-1 | integration 4건×2버전(기록 후 쓴 항목 읽힘, getExpiration ≤ now, 레거시 공유 Hash, 1.0.x 미래 시각 치유), e2e full-cc 'max' 후 재생성 1회 | oracle(durations): Next는 옛 항목을 stale로 1회 제공(1.x는 미스)하고, Next 기본 `getExpiration`은 미래 `expired`를 돌려줘 soft 태그 항목을 버린다(1.x는 히트) — P2 `_tagstate` |
+| 7-2 | fault 1건(`cleanupOldBuildKeys` 3초 내 포기 — 7-9의 연결 타임아웃으로 해소) | fault 2건(README 1.0.x 배선의 무한 connect 대기, hook throw 전파), chaos C1 2건·C9 1건 — P2(`connectRedis`, hook 오류 격리). 1.1.0 README 배선(1초 상한 race)은 fault 테스트로 검증 |
+| 7-3 | fault 2건, chaos C2 2건·C5 1건 | — |
+| 7-4 | integration 6건×2버전, e2e static-site 세그먼트 prefetch 200(A6, `/` 추가) | — (A2 빈 Redis 404는 P3) |
+| 7-5 | — | integration 2건(P2) |
+| 7-6 | — | integration 2건, e2e full-legacy 2건(pinned 'max' 404를 7-1에서 7-6으로 재분류 — 미래 시각이 사라진 뒤 남은 원인이 레거시 삭제), chaos C6·C13 (P2) |
+| 7-7 | fault 1건, unit 2건(전이 기반: 장애 20회에 warn 1회, 복구 info 1회) | — |
+| 7-8 | — | unit 1건, contract-types 2건(P2: peer `next ^16.1`) |
+| 7-9 | integration 2건×2버전(500개 배치, 겹치는 패턴 1회 집계) | integration 1건(최근 접근 옛 빌드 보존), chaos C11·C12 — P4 레지스트리 정리 |
+| 7-10 | unit 1건 | — |
+| 7-11 | — | unit 3건, integration 1건(P2 TTL 정책) |
+| 7-12 | — | integration 3건(P2) |
+| 7-13 | unit 3건(README cacheLife·Security·타임아웃 주장) | unit 1건(기본 use-cache 키가 keyPrefix 밖 — 키 형식 변경이라 P2) |
+
+로컬 확인(P1 최종, Windows + Docker Desktop, Next 16.3.6, tarball 설치): typecheck·lint·build·quality 통과, `npm test` 52+기대 실패 6, fault 28+2, integration 44+22(Redis 7.2·8.4), e2e 3앱 18 통과(기대 실패 3: A2, 7-6 2건), chaos 6 통과 + 기대 실패 7(C1×2·C9·C6·C13·C11·C12), perf 기준선 1.1.0. `@redis/client 6.2.1`로 typecheck + integration 46건 통과.
+
 1.0.6에서 통과하는(=버그가 아닌) 대조군도 같이 둔다: 즉시 만료 `updateTags(tags)`는 oracle과 일치(히트·미스 각 10건 이상 발생 확인), 레거시 핸들러는 ready 검사를 먼저 해 재연결 중 명령을 쌓지 않음, updateTag 서버 액션은 즉시 반영, C2·C5에서 I1(전부 200)·I4(10s 내 히트 재개)는 유지.
 
 ---
@@ -441,7 +468,7 @@ docs에서 이관된 검증: `prod-cache.spec.ts`(Redis 없이 200) → static-s
 | **P0c 테스트 앱·하네스** | 앱 3개, `_variants` 16.1/16.3/canary, `pack`, `prepare-app`(tgz·`npm:1.0.6`·`--hot-dist`), origin server, fleet(LB·롤링), 테스트 훅, `NRC_API` v1/v2 어댑터, contract·e2e job | 각 앱이 16.1·16.3에서 standalone 빌드, **1.0.6(v1 API)** 으로 fleet 2인스턴스 동작, `npm ls` 단일 Next, cacheComponents 제약 확인 | P0b | L |
 | **P0d 재현·기준선** | 6.9 매핑의 `it.fails`·e2e·chaos 실패 케이스, oracle 차분, perf 기준선(1.0.6 왕복 수·메모리) 커밋 | 전 항목 1.0.6에서 재현, 기준선 JSON 커밋, ci e2e(pr) 동작 | P0c | M |
 | **P0e nightly·리포팅** | `nightly.yml`, release 게이트 연결, artifact 리포트, flaky 정책, Stryker | nightly 1회 완주, release가 게이트 없이 게시 불가 | P0d | S |
-| P1 1.1.0 핫픽스 | 4절 목록 + LICENSE·exports types·Action SHA 고정·OIDC | 해당 `it.fails` 전환, static-site e2e 세그먼트 prefetch 200, OIDC+provenance 게시 | P0e | M |
+| P1 1.1.0 핫픽스 | 4절 목록 + LICENSE·exports types·Action SHA 고정·OIDC | 해당 `it.fails` 전환, static-site e2e 세그먼트 prefetch 200, OIDC+provenance 게시 | P0e | M — **게시 준비 완료**(OIDC 실게시만 남음, 11절) |
 | P2 v2 코어 | 팩토리 API, 키 스키마·엔벨로프, `_tagstate`, Next 16 의미론(레거시·use-cache SWR, `getExpiration=Infinity`), run 파이프라인(circuit·타임아웃), logger·onEvent, `connectRedis`, 빌드 페이즈 no-op, TTL 정책 → `2.0.0-next.0` | A1(7-1·2·3·5·6·7·10·11·12), A4, A7, A8 — oracle·fault·full-cc e2e로 판정 | P0 | L |
 | P3 폴백·프리워밍 | FileSystemCache 폴백, 재시드, 새 프리워밍, Next 매트릭스 계약 → `next.1` | A2, A3, A6 (static-site e2e, C1·C3·C6), 16.1·16.3 통과 | P2 | M |
 | P4 유지보수 | `cleanupOldBuilds`, `whenReady`, `startCacheMaintenance`, v1 레이아웃 호환, `_*` 예약, deprecated `cleanupOldBuildKeys` → `next.2` | A5 (C11·C12, integration) | P2 | S~M |
@@ -491,6 +518,15 @@ docs에서 이관된 검증: `prod-cache.spec.ts`(Redis 없이 200) → static-s
 | D8 | nightly.yml·chaos.yml을 바꾸는 `feat/**` push에서 nightly 1회 실행(주간 job 포함) | schedule은 기본 브랜치에서만 돌아 머지 전 검증 수단이 없음 |
 | D9 | release 필수 chaos 부분집합 = C1·C9·C11·C12(현재 구현분) | C3·C7은 해당 단계에서 추가 |
 | D10 | static-site 본문 100~250KB 텍스트(HTML 200~500KB) | 1MB HTML은 로컬 반복이 과도 |
+| D11 | (P1) 7-1: `updateTags(tags, durations)`도 `now` 기록(SWR 아님). 1.0.x가 남긴 `now+60초` 초과 시각은 읽을 때 `now`로 간주하고 HSET으로 덮어씀 | 스키마 불변(태그당 값 1개)으로는 stale/expired 구분 불가 — 미스 1회 후 정상이 1년 미스보다 낫고 Next 기본(stale 1회 제공)에 가장 가깝다. 치유가 없으면 업그레이드해도 오염된 태그가 최대 1년 남는다. 60초 = 인스턴스 간 시계 오차 허용. 치유 HSET과 동시 updateTags 사이 수 ms 역행 가능(문서화) |
+| D12 | (P1) `cleanupOldBuildKeys`는 Redis 때문에 reject하지 않는다: `timeoutMs`(기본 5000, 연결·명령), `reconnectStrategy:false`, 실패 시 warn 후 지운 수로 resolve | README 배선이 instrumentation에서 await한다 — reject는 기동 실패, 1.0.6은 무한 대기였다 |
+| D13 | (P1) 오류 로깅 = 핸들러별 `ErrorReporter`: 전이 시 warn, 분당 최대 1회 요약, 복구 시 info 1회. 키는 120자로 자름 | 매 요청 로그는 장애 중 홍수, debug 게이트는 무음(7-7). logger 옵션·onEvent는 2.0(5.3) |
+| D14 | (P1) peer `@redis/client` `^5.0.0 \|\| ^6.0.0`, CI에 6 셀(integration+typecheck) | 6.2.1로 로컬 검증 통과(RESP3 기본). `>=5`는 미검증 7.x까지 허용 |
+| D15 | (P1) `engines.node >=18.18.0` | 1.x peer가 Next 15(>=18.18)를 허용. 2.0에서 `>=20.9` |
+| D16 | (P1) release: changesets/action v1.9.0 SHA 고정, `npm@11.20.0` 고정 설치, setup-node `registry-url` 없음, `NPM_CONFIG_PROVENANCE=true` | v2는 Changesets v3 필요. npm 버전 고정은 액션 SHA 고정과 같은 공급망 이유 |
+| D17 | (P1) README Quick Start를 1초 상한 connect race로 바꿨지만 테스트 앱 v1 어댑터는 1.0.x README 배선 유지 | D3(기존 사용자 경험 재현) 유지 — 7-2 재현(C1·C9)이 그대로 의미를 가진다. 새 배선은 fault 테스트로 검증 |
+| D18 | (P1) e2e full-legacy pinned 'max' 재현을 7-1 → 7-6으로 재분류, oracle(durations)은 7-1 재현으로 유지(P2) | 1.1.0 뒤 남은 원인이 각각 레거시 삭제·SWR/Next getExpiration 의미 차이 |
+| D19 | (P1) perf `--as <버전>` 추가, 기준선 `1.1.0.json`(JSON에 `packageVersionField: 1.0.6`) | changeset version 전이라 설치본 version이 1.0.6 — 그대로 쓰면 1.0.6.json을 덮어쓴다 |
 
 ---
 
@@ -505,7 +541,9 @@ docs에서 이관된 검증: `prod-cache.spec.ts`(Redis 없이 200) → static-s
 - fleet의 `node server.js`는 standalone 조립(`.next/static` 복사 등, docs `Dockerfile:31-40`과 동일)을 `prepare-app`이 재현해야 함.
 - OIDC + changesets/action 조합 미검증 → 첫 게시는 프리릴리스로.
 - 외부 사용자(월 4.4k 다운로드 추정) → 2.0 마이그레이션 가이드 필수, 1.x 핫픽스 유지.
-- `@redis/client` 6.x(6.2.1 출시)를 peer `>=5.0.0`이 허용하지만 테스트하지 않았다. P1(1.1.0)에서 peer 상한(`>=5 <6` 또는 `^5`)을 둘지, 6.x 매트릭스를 추가할지 결정해야 한다.
+- ~~`@redis/client` 6.x 미검증~~ → P1에서 해소(D14). 남은 것: 6 셀은 fault·oracle(mini-redis RESP2 전용)을 돌리지 않는다. 2.0에서 mini-redis에 `HELLO`/RESP3를 넣거나 테스트 클라이언트를 RESP2로 고정해 채운다.
+- 1.0.x → 1.1.0 롤링 중 옛 Pod는 여전히 `now+expire`를 쓴다 → 새 Pod가 읽을 때 치유(D11). 옛 Pod끼리는 1.0.x 동작 그대로.
+- 신뢰 게시 설정은 2FA 대화형 인증이 필요하다 — 2FA 우회 토큰으로는 `npm trust`도 웹 설정도 대신할 수 없다.
 - Stryker vitest-runner가 vitest 5를 제대로 지원하면 per-test 커버리지 모드로 되돌린다(현재 command runner라 변이마다 전체 실행).
 - Windows 로컬의 Defender 첫 열람 지연 — `.work/` 예외 권장(prepare-app이 흡수하지만 static-site 1벌에 3분 이상).
 
@@ -522,4 +560,52 @@ docs에서 이관된 검증: `prod-cache.spec.ts`(Redis 없이 200) → static-s
 | 2026-09-29 | P0b | Linux CI 검증: `feat/**` push 트리거(Q18) 추가 후 첫 실행 [36513562634](https://github.com/mirunamu00/next-redis-cache/actions/runs/36513562634) 8 job 전부 성공(fault job의 `infra:up -- redis84 toxiproxy`, integration 7.2/8.4 포함) → P0b 완료 기준 전부 충족 |
 | 2026-09-29 | P0c | 완료. 3앱 × 16.1.7·16.3.6 standalone 빌드(로컬 Windows·CI Linux), `npm ls` 단일 인스턴스 검사 통과, **npm 1.0.6 tarball**로 fleet 2인스턴스 e2e: 16.3 18건·16.1 18건 통과(스모크 13 + 기대 실패 5). cacheComponents 제약 빌드 오류로 확인. contract-types 16.1·16.3 통과. CI [36520127962](https://github.com/mirunamu00/next-redis-cache/actions/runs/36520127962)에서 setup·contract 2·e2e 3·perf 포함 15 job 성공. 계획 대비 변경은 6.2·6.3·6.4·8.1절 |
 | 2026-09-29 | P0d | 완료. 7-1~7-13 전부 + A2를 1.0.6에서 재현(6.9절 표, `NRC_REPRO=show` 출력으로 확인). vitest 기대 실패 50건(unit 9·fault 6·integration 17×2버전·contract 1) + chaos 10건 + e2e 5건 + tsc 2건. 로컬 `test:all` 87 통과 + 50 기대 실패, `test:chaos` 3 통과 + 10 기대 실패. perf 기준선 `tests/perf/baseline/1.0.6.json`(레거시 히트 3명령, use-cache 페이지 8명령, static-site 1벌 123키·116,060,896바이트) 커밋, CI perf 게이트가 Linux에서 같은 기준선으로 통과 |
+| 2026-09-29 | P1 | 게시 준비 완료(feat/test-infra). 7-1·7-3·7-4·7-7·7-9·7-10 수정 + 패키징(조건별 types·engines·repository·peer `@redis/client ^5\|\|^6`) + release.yml OIDC + README(7-13 중 P1 항목) + changeset(minor) + perf 기준선 1.1.0. 전환 현황·로컬 결과는 6.9절, 결정은 D11~D19, 게시 절차는 11절. CI는 11절 표 |
 | 2026-09-29 | P0e | 완료. nightly를 `feat/**` push로 1회 완주: [36521161066](https://github.com/mirunamu00/next-redis-cache/actions/runs/36521161066) 34 job 중 33 성공·1 skip(report, schedule 전용), 22분 — ci level=full(e2e 12셀 = 3앱×[16.1,16.3]×[7.2,8.4], contract 16.1·16.3·canary, perf+timing, 병합 커버리지), chaos 전체, quarantine, e2e Node 24 3앱, mutation(22.3분), canary e2e. release는 `needs: [gate, chaos]`로 ci full + chaos 부분집합 없이는 게시 불가(actionlint 통과). mutation 점수 27.6%(로컬, 671 변이 — integration 계층이 빠진 docker 불필요 테스트 기준, 리포트 전용) |
+
+---
+
+## 11. 1.1.0 게시 절차 (P1 결과)
+
+전제: `feat/test-infra`를 master로 병합(= release.yml이 돈다). **이 브랜치에서는 게시하지 않는다**(Q18).
+
+### 11.1 권장 — 신뢰 게시(OIDC) + provenance
+
+1. 신뢰 게시자 등록(1회, 사용자 — 2FA 계정 로그인 필요):
+   - 웹: npmjs.com → `@mirunamu/next-redis-cache` → Settings → Trusted Publisher → GitHub Actions, Organization or user `mirunamu00`, Repository `next-redis-cache`, Workflow filename `release.yml`, Environment 비움.
+   - 또는 CLI(npm ≥11.15.0, 로컬 Node 22.21이라 npm 11 사용):
+     ```
+     npx -y npm@11.20.0 login
+     npx -y npm@11.20.0 trust github @mirunamu/next-redis-cache --file release.yml --repository mirunamu00/next-redis-cache --allow-publish
+     npx -y npm@11.20.0 trust list @mirunamu/next-redis-cache
+     ```
+     (`--dry-run --json`으로 확인한 페이로드: `{"package":"@mirunamu/next-redis-cache","file":"release.yml","repository":"mirunamu00/next-redis-cache","permissions":["createPackage"]}`. 2FA 우회 granular 토큰으로는 거부된다.)
+2. master에 병합·push → release.yml: gate(ci full) + chaos(C1·C9·C11·C12) 통과 후 changesets/action이 "chore: release" PR(1.0.6→1.1.0, CHANGELOG)을 연다. (저장소 설정 "Allow GitHub Actions to create and approve pull requests"가 켜져 있어야 한다.)
+3. 그 PR을 병합 → 다시 release.yml → 미게시 changeset이 없으므로 `changeset publish` → npm 11.20.0이 OIDC로 게시 + provenance, 태그 `v1.1.0`·GitHub Release 생성.
+4. 확인: `npm view @mirunamu/next-redis-cache@1.1.0 dist.attestations`(provenance), npmjs.com 페이지의 "Built and signed on GitHub Actions".
+5. 이후(사용자): 패키지 Settings → "Require two-factor authentication and disallow tokens", `NPM_TOKEN` 시크릿·토큰 폐기.
+
+### 11.2 대안 — 로컬 게시(토큰, provenance 없음)
+
+신뢰 게시 설정 전에 1.1.0을 먼저 내야 할 때. 토큰은 파일에 쓰지 않고 env로만 넘기며, 레포 밖 임시 userconfig를 쓴다.
+
+```bash
+git switch master && git pull --ff-only          # feat/test-infra 병합 후
+git switch -c release/1.1.0
+npm ci
+# changelog-github이 GitHub API로 커밋/PR 정보를 읽어 GITHUB_TOKEN이 필요하다(읽기 권한 PAT면 충분).
+GITHUB_TOKEN=<github-pat> npx changeset version   # package.json 1.1.0, CHANGELOG.md, .changeset/hotfix-1-1-0.md 삭제
+npm run build && npm run quality && npm test
+git commit -am "chore: release 1.1.0"
+# 게시: 레포 밖 임시 userconfig에 토큰 변수 참조만 쓴다(값은 env로)
+NPMRC="$(mktemp)"; printf '//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n' > "$NPMRC"
+NPM_TOKEN=<npm-token> NPM_CONFIG_USERCONFIG="$NPMRC" npm publish --access public   # prepublishOnly가 다시 빌드
+rm -f "$NPMRC"
+git tag v1.1.0
+```
+
+- GitHub 토큰이 없으면 `changeset version` 대신 수동: `npm version 1.1.0 --no-git-tag-version`, `.changeset/hotfix-1-1-0.md` 본문을 `CHANGELOG.md` 맨 위 `## 1.1.0` / `### Minor Changes` 아래에 옮기고 파일 삭제.
+- PowerShell이면 `$env:NPM_TOKEN`·`$env:NPM_CONFIG_USERCONFIG`로 같은 값을 설정하고 끝나면 `Remove-Item Env:NPM_TOKEN`.
+- 순서 주의: 버전 커밋을 master에 push하면 release.yml이 돈다. **로컬 게시를 먼저** 끝내야 release job의 `changeset publish`가 "1.1.0 이미 게시됨"으로 아무것도 하지 않는다(신뢰 게시 미설정 상태에서 먼저 push하면 게시 단계가 인증 실패로 빨간불).
+- 로컬 게시는 provenance를 만들 수 없다(`--provenance`는 지원 CI에서만).
+

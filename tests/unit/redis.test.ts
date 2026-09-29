@@ -76,6 +76,23 @@ const logger = () => ({
 const text = () => lines.map(([level, m]) => `${level} ${m}`);
 const REGISTRY = Symbol.for("@mirunamu/next-redis-cache/clients");
 
+/** Fakes only setTimeout/clearTimeout: setImmediate stays real, so created() can wait for the import. */
+const fakeTimers = () => vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+
+/**
+ * Waits (in real time) until connectRedis created its n-th client. open() imports @redis/client first,
+ * which can take a macrotask; fake time may only be advanced once the waitMs timer exists, which is set
+ * right after createClient (a run under load advanced it too early and hung in closeSharedClients).
+ */
+async function created(n = 1): Promise<ScriptedClient> {
+  const deadline = performance.now() + 5000;
+  while (h.created.length < n) {
+    if (performance.now() > deadline) throw new Error("createClient was not called");
+    await new Promise((r) => setImmediate(r));
+  }
+  return h.created[n - 1]!;
+}
+
 beforeEach(() => {
   lines = [];
   h.created.length = 0;
@@ -108,10 +125,11 @@ describe("connectRedis", () => {
   });
 
   it("answers as soon as the client is ready, without waiting for waitMs", async () => {
-    vi.useFakeTimers();
+    fakeTimers();
     let settled = false;
     const p = connectRedis("redis://h2:6379", { logger: logger() }).then(() => (settled = true));
-    await vi.advanceTimersByTimeAsync(0);
+    await created();
+    await new Promise((r) => setImmediate(r)); // no fake time passes
     expect(settled).toBe(true);
     await p;
     expect(lines).toEqual([]);
@@ -119,10 +137,11 @@ describe("connectRedis", () => {
 
   it("waits DEFAULT_CONNECT_WAIT_MS (1000) by default, then returns the connecting client with one warning", async () => {
     expect(DEFAULT_CONNECT_WAIT_MS).toBe(1000);
-    vi.useFakeTimers();
+    fakeTimers();
     h.behavior = "hang";
     let client: unknown;
     const p = connectRedis("redis://h3:6379", { logger: logger() }).then((c) => (client = c));
+    await created();
     await vi.advanceTimersByTimeAsync(999);
     expect(client).toBeUndefined();
     await vi.advanceTimersByTimeAsync(1);
@@ -132,9 +151,10 @@ describe("connectRedis", () => {
   });
 
   it("uses waitMs and the label in its log lines", async () => {
-    vi.useFakeTimers();
+    fakeTimers();
     h.behavior = "hang";
     const p = connectRedis("redis://h4:6379", { waitMs: 50, label: "docs", logger: logger() });
+    await created();
     await vi.advanceTimersByTimeAsync(50);
     const c = (await p) as unknown as ScriptedClient;
     expect(c.isReady).toBe(false);
@@ -143,11 +163,10 @@ describe("connectRedis", () => {
   });
 
   it("does not warn when the client is ready although connect() has not settled", async () => {
-    vi.useFakeTimers();
+    fakeTimers();
     h.behavior = "hang";
     const p = connectRedis("redis://h5:6379", { waitMs: 10, logger: logger() });
-    await vi.advanceTimersByTimeAsync(0); // createClient runs after the dynamic import
-    h.created[0]!.emit("ready");
+    (await created()).emit("ready");
     await vi.advanceTimersByTimeAsync(10);
     await p;
     expect(lines).toEqual([]);
@@ -173,10 +192,11 @@ describe("connectRedis", () => {
   });
 
   it("logger: false is silent", async () => {
-    vi.useFakeTimers();
+    fakeTimers();
     h.behavior = "hang";
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const p = connectRedis("redis://h8:6379", { waitMs: 5, logger: false });
+    await created();
     await vi.advanceTimersByTimeAsync(5);
     await p;
     h.created[0]!.emit("error", new Error("boom"));
@@ -184,11 +204,10 @@ describe("connectRedis", () => {
   });
 
   it("logs outage and recovery transitions only, never one line per reconnect attempt", async () => {
-    vi.useFakeTimers();
+    fakeTimers();
     h.behavior = "hang";
     const p = connectRedis("redis://:pw@h9:6379", { waitMs: 100, logger: logger() });
-    await vi.advanceTimersByTimeAsync(0);
-    const c = h.created[0]!;
+    const c = await created();
     c.emit("error", new Error("ECONNREFUSED 1"));
     c.emit("error", new Error("ECONNREFUSED 2"));
     await vi.advanceTimersByTimeAsync(100);
@@ -213,9 +232,10 @@ describe("connectRedis", () => {
   // 7-14 (production verification of 2.0.0-next.0): "docs: not connected within 1000ms; connecting in the
   // background" was followed by "docs: connected to redis://... again" although it never had been connected
   it("[7-14] the first connection after a slow start is not logged as a reconnection", async () => {
-    vi.useFakeTimers();
+    fakeTimers();
     h.behavior = "hang";
     const p = connectRedis("redis://h11:6379", { waitMs: 100, label: "docs", logger: logger() });
+    await created();
     await vi.advanceTimersByTimeAsync(100);
     await p;
     h.created[0]!.emit("ready");

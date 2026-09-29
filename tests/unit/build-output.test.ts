@@ -1,11 +1,11 @@
 // Build-output fallback and re-seeding (ROADMAP.md 5.4, A2): prerendered pages and route handlers answer
 // from `.next/server/app` (read by Next's own FileSystemCache) when Redis has nothing or is unavailable.
 // Uses the next-build fixture (a Next 16.3.6 static-site build) and an in-memory client.
-import { cpSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import type { CacheEvent, RedisCacheConfig } from "../../src/types";
 import { entryKey } from "../../src/keys";
 import { decodeEnvelope } from "../../src/envelope";
@@ -13,8 +13,51 @@ import { fakeRedis } from "../support/fake-redis";
 import { legacyHandler } from "../support/handlers";
 import { waitFor } from "../support/wait-for";
 
-const SERVER_DIST = fileURLToPath(new URL("../fixtures/next-build/.next/server/", import.meta.url));
-const ABOUT_MTIME = statSync(path.join(SERVER_DIST, "app", "about.html")).mtime.getTime();
+const FIXTURE_DIST = fileURLToPath(new URL("../fixtures/next-build/.next/", import.meta.url));
+/**
+ * Build time of the copies the tests use. Fixed and in the past: the tag checks compare invalidation times
+ * with the file time strictly (Next's areTagsExpired: `expired > timestamp`), so a copy written in the same
+ * millisecond as an invalidation made the result depend on the machine's speed (CI run 36544312834,
+ * unit Node 24: "expected 1790671317671 to be -1").
+ */
+const BUILD_TIME = new Date("2026-01-01T00:00:00Z");
+const ABOUT_MTIME = BUILD_TIME.getTime();
+
+/** Copies the fixture build output (optionally editing the manifest) with every file at BUILD_TIME. */
+type Manifest = { routes: Record<string, { srcRoute?: string }>; dynamicRoutes?: Record<string, { fallback: false | null | string }> };
+
+function buildCopy(editManifest?: (manifest: Manifest) => void) {
+  const root = mkdtempSync(path.join(tmpdir(), "nrc-bo-"));
+  cpSync(FIXTURE_DIST, root, { recursive: true });
+  if (editManifest) {
+    const file = path.join(root, "prerender-manifest.json");
+    const manifest = JSON.parse(readFileSync(file, "utf8")) as Manifest;
+    editManifest(manifest);
+    writeFileSync(file, JSON.stringify(manifest));
+  }
+  const touch = (dir: string) => {
+    for (const e of readdirSync(dir, { withFileTypes: true })) {
+      const p = path.join(dir, e.name);
+      if (e.isDirectory()) touch(p);
+      else utimesSync(p, BUILD_TIME, BUILD_TIME);
+    }
+  };
+  touch(root);
+  return { serverDistDir: path.join(root, "server"), cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
+let copy: ReturnType<typeof buildCopy>;
+let SERVER_DIST: string;
+
+beforeAll(() => {
+  copy = buildCopy();
+  SERVER_DIST = copy.serverDistDir;
+  expect(statSync(path.join(SERVER_DIST, "app", "about.html")).mtime.getTime()).toBe(ABOUT_MTIME);
+});
+
+afterAll(() => {
+  copy?.cleanup();
+});
 const PAGE = { kind: "APP_PAGE" } as const;
 const ROUTE = { kind: "APP_ROUTE" } as const;
 
@@ -74,16 +117,11 @@ describe("serving from the build output", () => {
 });
 
 /** A copy of the fixture where /about is a prerendered path of a dynamicParams = false route. */
-function fallbackFalseCopy() {
-  const root = mkdtempSync(path.join(tmpdir(), "nrc-ff-"));
-  cpSync(path.join(SERVER_DIST, ".."), root, { recursive: true });
-  const file = path.join(root, "prerender-manifest.json");
-  const manifest = JSON.parse(readFileSync(file, "utf8"));
-  manifest.routes["/about"].srcRoute = "/[page]";
-  manifest.dynamicRoutes = { "/[page]": { fallback: false } };
-  writeFileSync(file, JSON.stringify(manifest));
-  return { serverDistDir: path.join(root, "server"), cleanup: () => rmSync(root, { recursive: true, force: true }) };
-}
+const fallbackFalseCopy = () =>
+  buildCopy((manifest) => {
+    manifest.routes["/about"].srcRoute = "/[page]";
+    manifest.dynamicRoutes = { "/[page]": { fallback: false } };
+  });
 
 describe("tag state of build-output entries", () => {
   it("a page invalidated after the build is a miss, so Next renders it before answering (onTagExpired auto)", async () => {
@@ -132,15 +170,10 @@ describe("re-seeding", () => {
     const { fake, handler, ns, events } = setup();
     await Promise.all([handler.get("/about", PAGE), handler.get("/about", PAGE), handler.get("/about", PAGE)]);
     await waitFor(() => events.some((e) => e.type === "reseed"), { message: "reseed event" });
-    await new Promise((r) => setTimeout(r, 20));
-    // Concurrent misses write at most once per key in flight; a late one is skipped by NX
     const sets = fake.calls.filter((c) => c.cmd === "set");
-    expect(sets.length).toBeGreaterThanOrEqual(1);
-    expect(events.filter((e) => e.type === "reseed")).toHaveLength(1);
-    for (const set of sets) {
-      expect(set.args[0]).toBe(entryKey(ns, "b1", "/about"));
-      expect(set.args[2]).toEqual({ expiration: { type: "EX", value: 30 * 24 * 3600 }, condition: "NX" });
-    }
+    expect(sets).toHaveLength(1);
+    expect(sets[0]!.args[0]).toBe(entryKey(ns, "b1", "/about"));
+    expect(sets[0]!.args[2]).toEqual({ expiration: { type: "EX", value: 30 * 24 * 3600 }, condition: "NX" });
     const { meta } = await decodeEnvelope<{ lastModified: number; tags: string[] }>(fake.store.get(entryKey(ns, "b1", "/about"))!.data as Buffer);
     expect(meta.lastModified).toBe(ABOUT_MTIME);
     expect(meta.tags).toContain("_N_T_/about");

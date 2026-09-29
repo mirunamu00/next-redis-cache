@@ -40,3 +40,13 @@ export async function timed<T>(fn: () => Promise<T>): Promise<{ value: T; ms: nu
   const value = await fn();
   return { value, ms: performance.now() - t0 };
 }
+
+/**
+ * Resolves once Date.now() has moved at least `ms` past the time of the call. Tests that order an entry
+ * and an invalidation by time use this instead of a fixed sleep: the comparisons are strict (Next's
+ * `expired > timestamp`), and a timer alone does not guarantee that the wall clock moved.
+ */
+export async function clockAdvance(ms = 2): Promise<void> {
+  const target = Date.now() + ms;
+  while (Date.now() < target) await new Promise((r) => setTimeout(r, 1));
+}

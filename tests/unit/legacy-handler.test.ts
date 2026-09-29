@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { entryKey } from "../../src/keys";
 import type { CacheEvent } from "../../src/types";
 import { fakeRedis } from "../support/fake-redis";
+import { clockAdvance } from "../support/wait-for";
 import { appPageValue, appRouteValue, fetchValue, legacyHandler } from "../support/handlers";
 
 afterEach(() => {
@@ -111,7 +112,7 @@ describe("tag invalidation (no key is deleted)", () => {
   it("a page with an expired tag is served stale (lastModified -1) when the route is unknown (no build output)", async () => {
     const { fake, handler, events } = setup();
     await handler.set("/p", page(["t"]), {});
-    await new Promise((r) => setTimeout(r, 2));
+    await clockAdvance();
     await handler.revalidateTag("t");
     const got = await handler.get("/p", { kind: "APP_PAGE" });
     expect(got?.lastModified).toBe(-1);
@@ -124,7 +125,7 @@ describe("tag invalidation (no key is deleted)", () => {
     const { fake, client } = fakeRedis();
     const { handler } = legacyHandler({ client }, fileURLToPath(new URL("../fixtures/next-build/.next/server/", import.meta.url)));
     await handler.set("/about", page(["t"]), {});
-    await new Promise((r) => setTimeout(r, 2));
+    await clockAdvance();
     await handler.revalidateTag("t");
     expect(await handler.get("/about", { kind: "APP_PAGE" })).toBeNull();
     expect(fake.count("unlink")).toBe(0);
@@ -133,7 +134,7 @@ describe("tag invalidation (no key is deleted)", () => {
   it("onTagExpired: \"miss\" returns null for an expired page", async () => {
     const { handler } = setup({ onTagExpired: "miss" });
     await handler.set("/p", page(["t"]), {});
-    await new Promise((r) => setTimeout(r, 2));
+    await clockAdvance();
     await handler.revalidateTag("t");
     expect(await handler.get("/p", { kind: "APP_PAGE" })).toBeNull();
   });
@@ -155,7 +156,7 @@ describe("tag invalidation (no key is deleted)", () => {
   it("a fetch entry with an expired tag (updateTag) is a miss", async () => {
     const { handler } = setup();
     await handler.set("f", fetchValue(), { fetchCache: true, tags: ["t"] });
-    await new Promise((r) => setTimeout(r, 2));
+    await clockAdvance();
     await handler.revalidateTag("t");
     expect(await handler.get("f", { kind: "FETCH", tags: ["t"] })).toBeNull();
   });
@@ -163,7 +164,7 @@ describe("tag invalidation (no key is deleted)", () => {
   it("implicit (soft) tags of a fetch request are checked too", async () => {
     const { handler } = setup();
     await handler.set("f", fetchValue(), { fetchCache: true, tags: [] });
-    await new Promise((r) => setTimeout(r, 2));
+    await clockAdvance();
     await handler.revalidateTag("_N_T_/blog");
     expect(await handler.get("f", { kind: "FETCH", tags: [], softTags: ["_N_T_/blog"] })).toBeNull();
     expect(await handler.get("f", { kind: "FETCH", tags: [], softTags: ["_N_T_/other"] })).not.toBeNull();
@@ -172,7 +173,7 @@ describe("tag invalidation (no key is deleted)", () => {
   it("an entry written after the invalidation is fresh", async () => {
     const { handler } = setup();
     await handler.revalidateTag("t");
-    await new Promise((r) => setTimeout(r, 2));
+    await clockAdvance();
     await handler.set("/p", page(["t"]), {});
     expect((await handler.get("/p", { kind: "APP_PAGE" }))?.lastModified).toBeGreaterThan(0);
   });

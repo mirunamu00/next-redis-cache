@@ -5,7 +5,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { redisVersionsUnderTest, startRedisContainer, type RedisServer } from "../support/redis-container";
 import { connectTestClient, type TestRedisClient, type TrackedClient } from "../support/redis";
 import { uniqueNamespace } from "../support/namespace";
-import { waitFor } from "../support/wait-for";
+import { clockAdvance, waitFor } from "../support/wait-for";
 import { appPageValue, appRouteValue, fetchValue, legacyHandler, readEntry, testConfig, useCacheEntry, useCacheHandler } from "../support/handlers";
 import { cleanupOldBuildKeys } from "../../src/legacy-cleanup";
 import { LegacyCore } from "../../src/legacy-handler";
@@ -14,7 +14,7 @@ import { decodeEnvelope, encodeEnvelope } from "../../src/envelope";
 import { entryKey } from "../../src/keys";
 
 const YEAR = 365 * 24 * 3600;
-const tick = () => new Promise((r) => setTimeout(r, 5));
+const tick = () => clockAdvance(2);
 
 describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
   let server: RedisServer;

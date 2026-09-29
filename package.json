@@ -35,7 +35,7 @@
     "test": "vitest run --project unit --project property --project contract",
     "test:unit": "vitest run --project unit",
     "test:prop": "vitest run --project property",
-    "test:coverage": "vitest run --project unit --project property --coverage",
+    "test:coverage": "vitest run --project unit --project property --project contract --coverage",
     "test:watch": "vitest --project unit --project property",
     "test:int": "vitest run --project integration",
     "test:fault": "vitest run --project fault --project fault-docker",
@@ -62,7 +62,8 @@
     "test:contract:oracle": "vitest run --project contract",
     "test:contract:types": "node scripts/contract-types.mjs --variant all",
     "test:chaos": "vitest run --project chaos",
-    "test:perf": "node scripts/perf.mjs --check"
+    "test:perf": "node scripts/perf.mjs --check",
+    "test:mutation": "stryker run"
   },
   "peerDependencies": {
     "@redis/client": ">=5.0.0",
@@ -76,6 +77,8 @@
     "@playwright/test": "^1.63.0",
     "@redis/client": "^5.10.0",
     "@size-limit/file": "^14.1.0",
+    "@stryker-mutator/core": "^10.0.0",
+    "@stryker-mutator/vitest-runner": "^10.0.0",
     "@types/node": "^22.0.0",
     "@vitest/coverage-v8": "^5.0.2",
     "autocannon": "^8.0.0",

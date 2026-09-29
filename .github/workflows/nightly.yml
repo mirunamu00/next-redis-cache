@@ -2,7 +2,8 @@
 #
 #   daily   ci level=full (e2e [16.1, 16.3] x [7.2, 8.4], contract + canary) + every chaos scenario
 #           + perf with timing + quarantined tests x20 + e2e on Node 24
-#   weekly  + mutation (Stryker, fails below a 70% score since 2.0.0, Q13) + canary e2e (allowed to fail, Q15)
+#   weekly  + mutation (Stryker in 5 parallel shards, merged score must be >= 70% since 2.0.0, Q13, D59)
+#           + canary e2e (allowed to fail, Q15)
 #   failure of a scheduled run opens or updates an issue labelled nightly-failure
 #
 # Schedules only run on the default branch. To validate changes to this file (or chaos.yml) before
@@ -98,11 +99,22 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  # One Stryker run of every mutated file took 71 min of a 90-minute timeout on one runner (2030 mutants,
+  # each running the whole docker-free test set). The files are split into shards of about the same mutant
+  # count (scripts/mutation-shard.mjs, deterministic), each shard mutates only its files with the unchanged
+  # config and test set, and never breaks on its own score (NRC_MUTATION_SHARD); mutation-report merges the
+  # shard reports, fails if any mutated file is missing or duplicated, and gates the score of the whole.
   mutation:
-    name: mutation (weekly)
+    name: mutation shard ${{ matrix.shard }} (weekly)
     if: github.event_name == 'push' || github.event.schedule == '41 19 * * 0' || inputs.weekly
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5]
+    env:
+      NRC_MUTATION_SHARD: ${{ matrix.shard }}/${{ strategy.job-total }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -110,10 +122,42 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - name: Stryker (exits 1 below thresholds.break = 70%)
-        run: npm run test:mutation
+      - name: Files of this shard
+        id: shard
+        run: echo "files=$(node scripts/mutation-shard.mjs "$NRC_MUTATION_SHARD")" >> "$GITHUB_OUTPUT"
+      - name: Stryker on ${{ steps.shard.outputs.files }}
+        run: npx stryker run --mutate "${{ steps.shard.outputs.files }}"
       - if: always()
         run: node scripts/mutation-summary.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: mutation-shard-${{ matrix.shard }}
+          path: reports/mutation/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  mutation-report:
+    name: mutation (weekly, merged score >= 70%)
+    needs: mutation
+    if: always() && needs.mutation.result != 'skipped'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: mutation-shard-*
+          path: .artifacts/mutation
+      - name: Merge the shard reports (every mutated file exactly once)
+        run: node scripts/mutation-merge.mjs .artifacts/mutation
+      - name: Mutation score of the whole (exits 1 below 70%)
+        run: node scripts/mutation-summary.mjs --check
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -165,7 +209,7 @@ jobs:
 
   report:
     name: report failures
-    needs: [ci-full, chaos, quarantine, e2e-node24, mutation, canary]
+    needs: [ci-full, chaos, quarantine, e2e-node24, mutation, mutation-report, canary]
     if: always() && github.event_name == 'schedule'
     runs-on: ubuntu-latest
     timeout-minutes: 5

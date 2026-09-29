@@ -5,6 +5,14 @@
 // once per mutant. @stryker-mutator/vitest-runner 10.0.0 completes the dry run with vitest 5 but then
 // reports 0 executed tests for every mutant (all "survived"), so it cannot be used yet.
 // Without per-test coverage every mutant runs the whole set; --bail stops at the first failure.
+//
+// The weekly CI job runs this config in parallel shards (`--mutate` from scripts/mutation-shard.mjs, D59) with
+// NRC_MUTATION_SHARD set: a shard never breaks on the score of its own files, the merged report of all shards is
+// gated instead (scripts/mutation-merge.mjs, then mutation-summary.mjs --check against MUTATION_BREAK).
+
+/** Lowest acceptable mutation score in percent (Q13). */
+export const MUTATION_BREAK = 70;
+
 /** @type {import("@stryker-mutator/api/core").PartialStrykerOptions} */
 export default {
   testRunner: "command",
@@ -14,7 +22,7 @@ export default {
   reporters: ["clear-text", "progress", "html", "json"],
   htmlReporter: { fileName: "reports/mutation/index.html" },
   jsonReporter: { fileName: "reports/mutation/mutation.json" },
-  thresholds: { high: 80, low: 70, break: 70 },
+  thresholds: { high: 80, low: 70, break: process.env.NRC_MUTATION_SHARD ? null : MUTATION_BREAK },
   timeoutMS: 60_000,
   concurrency: 4,
   // The sandbox copy only needs sources, tests and configs

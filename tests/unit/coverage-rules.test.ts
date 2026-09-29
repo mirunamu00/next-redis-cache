@@ -41,7 +41,8 @@ describe("coverageFailures", () => {
 });
 
 describe("mutation gate", () => {
-  it("Stryker breaks the run below 70%", () => {
-    expect(stryker.thresholds?.break).toBe(70);
+  it("Stryker breaks an unsharded run below 70% (shards are gated on their merged report)", () => {
+    // these tests also run inside a sharded Stryker run, which sets NRC_MUTATION_SHARD
+    expect(stryker.thresholds?.break).toBe(process.env.NRC_MUTATION_SHARD ? null : 70);
   });
 });

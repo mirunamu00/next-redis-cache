@@ -2,6 +2,8 @@
 // and prewarm (ROADMAP.md 7-9, A5). Kubernetes semantics: maxSurge 1, maxUnavailable 0 - old instances keep
 // serving until replaced. 1.x deleted the old build's keys at startup and a miss became a 404; in 2.x the
 // previous build is kept (TTL capped) and every prerendered page has an answer from the build output anyway.
+// C15 (7-15): an old build still read while the new instances start is deferred, and the instances' rechecks
+// remove it once nobody reads it - without another deployment (minIdleSeconds 3 s here, 30 min by default).
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createClient } from "@redis/client";
 import { waitFor } from "../support/wait-for";
@@ -9,11 +11,14 @@ import { directRedisUrl, launch, traffic, type Fleet } from "./harness";
 
 const DOCS = ["/about", "/docs/guide/doc-0", "/docs/reference/doc-1", "/docs/tutorial/doc-2", "/docs/ops/doc-3", "/docs/api/section-1/doc-4", "/docs/concepts/doc-5"];
 
+/** minIdleSeconds of the fleet's cleanup: C15 waits for rechecks, which run minIdleSeconds + 1 s apart. */
+const MIN_IDLE = 3;
+
 let fleet: Fleet;
 let admin: ReturnType<typeof createClient>;
 
 beforeAll(async () => {
-  fleet = await launch("static-site", { builds: ["A"], instances: 2, env: { NRC_PREWARM: "1", NRC_CLEANUP: "1" } });
+  fleet = await launch("static-site", { builds: ["A"], instances: 2, env: { NRC_PREWARM: "1", NRC_CLEANUP: "1", NRC_CLEANUP_MIN_IDLE: String(MIN_IDLE) } });
   admin = createClient({ url: directRedisUrl });
   admin.on("error", () => {});
   await admin.connect();
@@ -31,11 +36,13 @@ async function rollTo(build: string) {
   return { result, builds: fleet.instances.map((m) => m.build) };
 }
 
+type CleanupValue = { kept: string[]; deferredBuilds: string[] };
+
 /** Waits until every current instance reports a finished cleanup; returns the results. */
-async function cleanups() {
+async function cleanups(): Promise<Array<{ gaveUp: boolean; value?: CleanupValue } | undefined>> {
   return waitFor(
     async () => {
-      const all = (await fleet.stats()) as Array<{ maintenance: { maintenance?: { cleanup?: { gaveUp: boolean; value?: { kept: string[] } } } } }>;
+      const all = (await fleet.stats()) as Array<{ maintenance: { maintenance?: { cleanup?: { gaveUp: boolean; value?: CleanupValue } } } }>;
       const results = all.map((s) => s.maintenance.maintenance?.cleanup);
       return results.every((r) => r && !r.gaveUp) ? results : undefined;
     },
@@ -71,6 +78,38 @@ describe("rolling updates with startup cleanup", () => {
     for (const r of results) expect(r!.value!.kept.sort()).toEqual(["A", "B"]);
     const registry = await admin.zRange(`${fleet.namespace}:_builds`, 0, -1);
     expect(registry.at(-1)).toBe("A");
+    expect(fleet.crashed).toEqual([]);
+  });
+
+  it("[7-15] C15 an old build still read during a rollout is removed by the rechecks once idle, without another deployment", async () => {
+    const orphan = (i: number) => `${fleet.namespace}:Z:e:/orphan-${i}`;
+    for (let i = 0; i < 3; i++) await admin.set(orphan(i), "x", { expiration: { type: "EX", value: 7 * 24 * 3600 } });
+    // an instance of an older build Z keeps reading its keys until the rollout is over
+    let reading = true;
+    const reader = (async () => {
+      while (reading) {
+        for (let i = 0; i < 3; i++) await admin.get(orphan(i));
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    })();
+    let rollout: Awaited<ReturnType<typeof rollTo>>;
+    let results: Awaited<ReturnType<typeof cleanups>>;
+    try {
+      rollout = await rollTo("B");
+      results = await cleanups();
+    } finally {
+      reading = false;
+      await reader;
+    }
+    expect(rollout.builds).toEqual(["B", "B"]);
+    expect(rollout.result.failures).toEqual([]);
+    for (const r of results) expect(r!.value!.deferredBuilds).toEqual(["Z"]);
+    // nobody reads Z any more: a recheck of the running instances removes it (MIN_IDLE + 1 s after their start
+    // pass, then again while it is still deferred)
+    await waitFor(async () => (await admin.exists([orphan(0), orphan(1), orphan(2)])) === 0, { timeout: 4 * (MIN_IDLE + 1) * 1000 + 5000, message: "Z removed by a recheck" });
+    expect(fleet.instances.map((m) => m.build)).toEqual(["B", "B"]); // no deployment in between
+    expect(await admin.zRange(`${fleet.namespace}:_builds`, 0, -1)).toEqual(["A", "B"]);
+    expect(await admin.exists(`${fleet.namespace}:A:e:/about`)).toBe(1); // the previous build stays
     expect(fleet.crashed).toEqual([]);
   });
 });

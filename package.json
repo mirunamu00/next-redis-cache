@@ -52,7 +52,13 @@
     "changeset": "changeset",
     "version": "changeset version",
     "release": "npm run build && changeset publish",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "pack:local": "node scripts/pack.mjs",
+    "apps:prepare": "node scripts/prepare-app.mjs",
+    "fleet": "node scripts/fleet.mjs",
+    "origin": "node scripts/origin-server.mjs",
+    "test:contract": "node scripts/contract-types.mjs --variant all",
+    "test:e2e": "playwright test"
   },
   "peerDependencies": {
     "@redis/client": ">=5.0.0",
@@ -63,6 +69,7 @@
     "@changesets/changelog-github": "^0.5.2",
     "@changesets/cli": "^2.29.8",
     "@eslint/js": "^10.0.1",
+    "@playwright/test": "^1.63.0",
     "@redis/client": "^5.10.0",
     "@size-limit/file": "^14.1.0",
     "@types/node": "^22.0.0",

@@ -19,5 +19,6 @@
     "types": ["node"]
   },
   "include": ["src", "tests", "*.config.ts"],
-  "exclude": ["dist", "node_modules", ".work", ".artifacts", "test-apps"]
+  // tests/contract/types compiles against a test app install (scripts/contract-types.mjs), not the repo root
+  "exclude": ["dist", "node_modules", ".work", ".artifacts", "test-apps", "tests/contract/types"]
 }

@@ -1,0 +1,15 @@
+{
+  // Used only by scripts/contract-types.mjs, which copies this directory into
+  // .work/contract@<variant>/ next to that variant's node_modules and runs tsc there.
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "lib": ["ES2022", "DOM"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "types": []
+  },
+  "include": ["*.contract.mts"]
+}

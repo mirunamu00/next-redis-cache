@@ -8,7 +8,8 @@
 #   fault (mini-redis + toxiproxy from docker compose)    |
 #   setup (build + npm pack -> tarball artifact)          |
 #     |- contract (tsc per Next variant)                  |
-#     |- e2e (app x Next x Redis, Playwright + fleet)   --+
+#     |- e2e (app x Next x Redis, Playwright + fleet)     |
+#     |- perf (deterministic gate vs tests/perf/baseline) -+
 #
 # level=pr (push, pull_request): e2e = 3 apps x Next 16.3 x Redis 8.4, contract = 16.1 + 16.3.
 # level=full (workflow_call from nightly/release): e2e = 3 apps x [16.1, 16.3] x [7.2, 8.4], contract + canary
@@ -259,10 +260,51 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  perf:
+    name: perf (deterministic gate)
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            test-apps/_variants/*/package-lock.json
+      - run: npm ci
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: package-tarball
+          path: .artifacts
+      - name: Start infrastructure
+        run: npm run infra:up -- redis84
+      - name: Build static-site and full-cc
+        run: |
+          node scripts/prepare-app.mjs static-site --no-pack --build A
+          node scripts/prepare-app.mjs full-cc --no-pack --build A
+      - name: Commands per request and build memory vs baseline (timing too on level=full)
+        run: node scripts/perf.mjs --check ${{ inputs.level == 'full' && '--time' || '' }}
+      - name: Stop infrastructure
+        if: always()
+        run: npm run infra:down
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: perf
+          path: |
+            reports/
+            .work/logs/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 30
+
   gate:
     name: gate
     if: always()
-    needs: [static, unit, unit-windows, integration, fault, setup, contract, e2e]
+    needs: [static, unit, unit-windows, integration, fault, setup, contract, e2e, perf]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

@@ -69,6 +69,14 @@ describe("miss reasons and boundaries", () => {
     expect(String(warn.mock.calls[0]?.[0])).toMatch(/use-cache get failed \(k\): MISCONF/);
   });
 
+  it("an unreadable entry is logged at debug level", async () => {
+    const lines: string[] = [];
+    const { fake, handler, key } = setup({ logger: { debug: (m: unknown) => void lines.push(String(m)) } });
+    await fake.set(key("k"), "1.x json");
+    expect(await handler.get("k", [])).toBeUndefined();
+    expect(lines).toEqual(["[next-redis-cache] use-cache get k: unreadable entry (not a next-redis-cache 2.x entry)"]);
+  });
+
   it("an envelope whose value is not bytes (a legacy value under the key) is a format miss", async () => {
     const { fake, handler, events, key } = setup();
     await fake.set(key("k"), await encodeEnvelope(meta(), { kind: "APP_PAGE" }));
@@ -138,13 +146,14 @@ describe("miss reasons and boundaries", () => {
 
   it("an implicit tag expired strictly before the entry was created keeps it; at the same millisecond it is a miss", async () => {
     vi.useFakeTimers({ now: T0 });
-    const { handler } = setup();
+    const { handler, events } = setup();
     await handler.updateTags(["_N_T_/p"]);
     await handler.set("same", Promise.resolve(useCacheEntry({ timestamp: Date.now() })));
     vi.advanceTimersByTime(1);
     await handler.set("k", Promise.resolve(useCacheEntry({ timestamp: Date.now() })));
     expect(await handler.get("k", ["_N_T_/p"])).toBeDefined();
     expect(await handler.get("same", ["_N_T_/p"])).toBeUndefined();
+    expect(reasons(events)).toEqual(["tag"]);
   });
 
   it("empty and duplicate soft tags are not sent", async () => {
@@ -205,6 +214,46 @@ describe("set details", () => {
     const tiny = setup({ ttl: { maxSeconds: 0.5 } });
     await tiny.handler.set("k", Promise.resolve(useCacheEntry({ timestamp: T0, expire: 100 })));
     expect(ttlOf(tiny.fake)).toBe(1);
+  });
+
+  it("an entry with expire 0 is not stored and not treated as an eviction mark", async () => {
+    vi.useFakeTimers({ now: T0 });
+    const { fake, handler } = setup();
+    await handler.set("k", Promise.resolve(useCacheEntry({ timestamp: T0, expire: 0 })));
+    expect(fake.calls).toEqual([]);
+  });
+
+  it("a get after a failed render does not wait for it", async () => {
+    const { handler } = setup();
+    await handler.set("k", Promise.reject(new Error("render failed")));
+    let done = false;
+    const read = handler.get("k", []).then(() => (done = true));
+    await new Promise((r) => setTimeout(r, 20));
+    expect(done).toBe(true);
+    await read;
+  });
+
+  it("reads time out after timeouts.readMs (entry, implicit and own tags), writes use timeouts.writeMs", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { fake, handler } = setup({ timeouts: { readMs: 50, writeMs: 10_000 } });
+    await handler.set("k", Promise.resolve(useCacheEntry({ tags: ["own"] })));
+    const hmGet = fake.hmGet.bind(fake);
+    fake.hmGet = () => new Promise(() => {}) as never; // only the own-tag read hangs
+    let t0 = Date.now();
+    expect(await handler.get("k", [])).toBeDefined(); // served as it is
+    expect(Date.now() - t0).toBeLessThan(2000);
+    fake.hmGet = hmGet;
+    fake.hanging = true;
+    t0 = Date.now();
+    expect(await handler.get("k", ["soft"])).toBeUndefined();
+    expect(Date.now() - t0).toBeLessThan(2000);
+    const slow = setup({ timeouts: { readMs: 10_000, writeMs: 50 } });
+    slow.fake.hanging = true;
+    t0 = Date.now();
+    await slow.handler.set("k", Promise.resolve(useCacheEntry()));
+    await slow.handler.set("k", Promise.resolve(useCacheEntry({ expire: -1 })));
+    await slow.handler.updateTags(["t"]);
+    expect(Date.now() - t0).toBeLessThan(2000);
   });
 
   it("an entry whose lifetime ended exactly now is not stored", async () => {

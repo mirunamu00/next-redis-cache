@@ -5,7 +5,7 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { decodeEnvelope } from "../../src/envelope";
+import { decodeEnvelope, encodeEnvelope } from "../../src/envelope";
 import { entryKey } from "../../src/keys";
 import type { CacheEvent, RedisCacheConfig } from "../../src/types";
 import { BUILD_TIME, buildCopy, type BuildCopy } from "../support/build-fixture";
@@ -48,6 +48,11 @@ describe("what set stores", () => {
     expect((await storedMeta(fake)).tags).toEqual([]);
     await handler.set("/e", null, {});
     expect((await storedMeta(fake)).tags).toEqual([]);
+    expect(await handler.get("/e", {})).toEqual({ lastModified: expect.any(Number), value: null });
+    await handler.set("/f", { ...appPageValue("x"), headers: { "x-next-cache-tags": 5 } }, {});
+    expect((await storedMeta(fake)).tags).toEqual([]);
+    await handler.set("/g", null, { fetchCache: true, tags: ["t"] });
+    expect(await storedMeta(fake)).toMatchObject({ tags: ["t"] });
   });
 
   it("fetch entries (value kind FETCH or ctx.fetchCache) take the unique context tags and the value's revalidate", async () => {
@@ -112,6 +117,69 @@ describe("what set stores", () => {
 });
 
 describe("get details", () => {
+  it("an absent entry is a miss event of the legacy handler", async () => {
+    const { handler, events } = setup();
+    expect(await handler.get("/nope", PAGE)).toBeNull();
+    expect(events).toEqual([{ type: "miss", handler: "legacy", key: "/nope", reason: "absent" }]);
+  });
+
+  it("an unreadable entry is logged at debug level", async () => {
+    const lines: string[] = [];
+    const { fake, handler, key } = setup({ logger: { debug: (m: unknown) => void lines.push(String(m)) } });
+    await fake.set(key("/old"), "1.x json");
+    expect(await handler.get("/old", PAGE)).toBeNull();
+    expect(lines).toEqual(["[next-redis-cache] legacy get /old: unreadable entry (not a next-redis-cache 2.x entry)"]);
+  });
+
+  it("an entry stored without a tag list has no tags to read", async () => {
+    const { fake, handler, key } = setup();
+    await fake.set(key("/p"), await encodeEnvelope({ lastModified: 5 }, { kind: "APP_ROUTE", body: Buffer.from("x"), status: 200, headers: {} }));
+    fake.calls.length = 0;
+    expect((await handler.get("/p", { kind: "APP_ROUTE" }))?.lastModified).toBe(5);
+    expect(fake.calls.map((c) => c.cmd)).toEqual(["get"]);
+  });
+
+  it("a successful get after a failure logs the recovery; a failed tag read names the operation", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    const { fake, handler } = setup();
+    await handler.set("/p", appPageValue("x", ["t"]), {});
+    fake.failOn.set("hmGet", new Error("LOADING"));
+    expect(await handler.get("/p", PAGE)).not.toBeNull();
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(/legacy get failed \(\/p\): LOADING/);
+    fake.failOn.clear();
+    await handler.get("/nope", PAGE);
+    expect(String(info.mock.calls[0]?.[0])).toMatch(/legacy recovered/);
+  });
+
+  it("reads time out after timeouts.readMs, writes use timeouts.writeMs", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { fake, handler } = setup({ timeouts: { readMs: 50, writeMs: 10_000 } });
+    await handler.set("/p", appPageValue("x", ["t"]), {});
+    fake.hanging = true;
+    const t0 = Date.now();
+    expect(await handler.get("/p", PAGE)).toBeNull();
+    expect(Date.now() - t0).toBeLessThan(2000);
+    const slow = setup({ timeouts: { readMs: 10_000, writeMs: 50 } });
+    slow.fake.hanging = true;
+    const t1 = Date.now();
+    await slow.handler.set("/p", appPageValue(), {});
+    await slow.handler.revalidateTag("t");
+    expect(Date.now() - t1).toBeLessThan(2000);
+  });
+
+  it("the entry's own tags are read with timeouts.readMs", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const { fake, handler } = setup({ timeouts: { readMs: 50, writeMs: 10_000 } });
+    await handler.set("/p", appPageValue("x", ["t"]), {});
+    const hmGet = fake.hmGet.bind(fake);
+    fake.hmGet = () => new Promise(() => {}) as never; // only the tag read hangs
+    const t0 = Date.now();
+    expect(await handler.get("/p", PAGE)).not.toBeNull(); // served as it is
+    expect(Date.now() - t0).toBeLessThan(2000);
+    fake.hmGet = hmGet;
+  });
+
   it("a disabled handler answers with a disabled miss and sends nothing", async () => {
     const { fake, handler, events } = setup({ disabled: true });
     expect(await handler.get("/a", PAGE)).toBeNull();
@@ -228,6 +296,16 @@ describe("get details", () => {
 });
 
 describe("render-start bookkeeping", () => {
+  it("a second miss exactly five minutes after the first keeps the first one", async () => {
+    vi.useFakeTimers({ now: T0 });
+    const { handler } = setup();
+    await handler.get("/a", PAGE);
+    vi.advanceTimersByTime(5 * 60_000);
+    await handler.get("/a", PAGE);
+    await handler.set("/a", appPageValue(), {});
+    expect((await handler.get("/a", PAGE))?.lastModified).toBe(T0);
+  });
+
   it("a render start older than five minutes is ignored, and a new miss then replaces it", async () => {
     vi.useFakeTimers({ now: T0 });
     const { handler } = setup();
@@ -344,6 +422,19 @@ describe("build id from Next's context", () => {
     expect(fake.calls[0]!.args[0]).toBe(entryKey(config.namespace, "first", "/p"));
   });
 
+  it("strips only the last server segment (a parent directory may be called server too)", async () => {
+    vi.stubEnv("BUILD_ID", "");
+    const root = mkdtempSync(path.join(tmpdir(), "nrc-bid-"));
+    dirs.push(root);
+    const distDir = path.join(root, "server", ".next");
+    mkdirSync(path.join(distDir, "server"), { recursive: true });
+    writeFileSync(path.join(distDir, "BUILD_ID"), "nested");
+    const { fake, client } = fakeRedis();
+    const { Handler, config } = legacyHandler({ client, buildId: undefined });
+    await new Handler({ serverDistDir: path.join(distDir, "server") }).set("/p", appPageValue(), {});
+    expect(fake.calls[0]!.args[0]).toBe(entryKey(config.namespace, "nested", "/p"));
+  });
+
   it.each(["server/", "server\\"] as const)("strips a trailing %s from serverDistDir", async (variant) => {
     vi.stubEnv("BUILD_ID", "");
     const { fake, client } = fakeRedis();
@@ -380,6 +471,30 @@ describe("build-output fallback error paths", () => {
     expect((await handler.get("/about", PAGE))?.lastModified).toBe(BUILD_TIME.getTime());
     expect(events).toContainEqual({ type: "fallback", handler: "legacy", key: "/about", state: "fresh" });
     expect(fake.calls.map((c) => c.cmd).slice(0, 2)).toEqual(["get", "hmGet"]);
+  });
+
+  it("the build output is looked for again once Next's context names serverDistDir", async () => {
+    const { client } = fakeRedis();
+    const events: CacheEvent[] = [];
+    const { Handler } = legacyHandler({ client, fallback: {}, onEvent: (e) => events.push(e) });
+    const early = new Handler(); // created before Next passed its context
+    expect(await early.get("/about", PAGE)).toBeNull();
+    new Handler({ serverDistDir: copy.serverDistDir });
+    expect((await early.get("/about", PAGE))?.lastModified).toBe(BUILD_TIME.getTime());
+    expect(events).toContainEqual({ type: "fallback", handler: "legacy", key: "/about", state: "fresh" });
+  });
+
+  it("a re-seed is a reseed event of the legacy handler; a failed one is reported as reseed", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const ok = fallback();
+    await ok.handler.get("/about", PAGE);
+    await waitFor(() => ok.events.some((e) => e.type === "reseed"), { message: "reseed" });
+    expect(ok.events.find((e) => e.type === "reseed")).toEqual({ type: "reseed", handler: "legacy", key: "/about" });
+    const failing = fallback();
+    failing.fake.failOn.set("set", new Error("OOM"));
+    await failing.handler.get("/about", PAGE);
+    await waitFor(() => warn.mock.calls.length > 0, { message: "reseed failure" });
+    expect(String(warn.mock.calls[0]?.[0])).toMatch(/legacy reseed failed \(\/about\): OOM/);
   });
 
   it("a failing tag read falls back with an unknown state, reported, and does not re-seed", async () => {

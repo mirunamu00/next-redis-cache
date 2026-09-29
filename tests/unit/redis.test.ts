@@ -138,6 +138,7 @@ describe("connectRedis", () => {
     await vi.advanceTimersByTimeAsync(50);
     const c = (await p) as unknown as ScriptedClient;
     expect(c.isReady).toBe(false);
+    c.emit("error", new Error("ECONNREFUSED")); // the same outage: no second warning
     expect(text()).toEqual(["warn [next-redis-cache] docs: not connected within 50ms; connecting in the background"]);
   });
 

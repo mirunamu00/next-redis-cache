@@ -197,7 +197,7 @@ describe("connectRedis", () => {
       "warn [next-redis-cache] redis: Redis unavailable (ECONNREFUSED 1); caching without Redis until it reconnects",
     ]);
     c.emit("ready");
-    expect(text().at(-1)).toBe("info [next-redis-cache] redis: connected to redis://:***@h9:6379 again");
+    expect(text().at(-1)?.startsWith("info [next-redis-cache] redis: connected to redis://:***@h9:6379")).toBe(true);
     c.emit("ready"); // already healthy: nothing new
     c.emit("error", "socket closed"); // healthy -> failing: warns again (non-Error values are described too)
     c.emit("error", new Error("ECONNREFUSED 3"));
@@ -206,6 +206,22 @@ describe("connectRedis", () => {
     ]);
     c.emit("ready");
     expect(text().length).toBe(4);
+    expect(text().at(-1)).toBe("info [next-redis-cache] redis: connected to redis://:***@h9:6379 again");
+  });
+
+  // 7-14 (production verification of 2.0.0-next.0): "docs: not connected within 1000ms; connecting in the
+  // background" was followed by "docs: connected to redis://... again" although it never had been connected
+  it.fails("[7-14] the first connection after a slow start is not logged as a reconnection", async () => {
+    vi.useFakeTimers();
+    h.behavior = "hang";
+    const p = connectRedis("redis://h11:6379", { waitMs: 100, label: "docs", logger: logger() });
+    await vi.advanceTimersByTimeAsync(100);
+    await p;
+    h.created[0]!.emit("ready");
+    expect(text()).toEqual([
+      "warn [next-redis-cache] docs: not connected within 100ms; connecting in the background",
+      "info [next-redis-cache] docs: connected to redis://h11:6379",
+    ]);
   });
 
   it("a first error after a healthy start warns; a ready without a prior warning logs nothing", async () => {

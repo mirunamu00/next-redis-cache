@@ -5,7 +5,8 @@ import { redisVersionsUnderTest, startRedisContainer, type RedisServer } from ".
 import { connectTestClient, type TestRedisClient, type TrackedClient } from "../support/redis";
 import { uniqueNamespace } from "../support/namespace";
 import { appPageValue, fetchValue, legacyHandler, useCacheEntry, useCacheHandler } from "../support/handlers";
-import { cleanupOldBuilds } from "../../src/maintenance";
+import { cleanupOldBuilds, startCacheMaintenance } from "../../src/maintenance";
+import { waitFor } from "../support/wait-for";
 
 describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
   let server: RedisServer;
@@ -49,6 +50,37 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
     await new Promise((r) => setTimeout(r, 3100));
     expect((await cleanupOldBuilds(client as never, { namespace: ns, buildId: "B", minIdleSeconds: 2 })).removedBuilds).toEqual(["A"]);
     expect(await client.exists(`${ns}:A:e:/page`)).toBe(0);
+  });
+
+  it("EXPIRE refreshes OBJECT IDLETIME; TTL, OBJECT and SCAN do not (why TTLs are read before capping)", async () => {
+    const ns = uniqueNamespace();
+    const key = `${ns}:A:e:/idle`;
+    await client.set(key, "x", { expiration: { type: "EX", value: 600 } });
+    await new Promise((r) => setTimeout(r, 2100));
+    await client.ttl(key);
+    await nsKeys(ns);
+    expect(await client.objectIdleTime(key)).toBeGreaterThanOrEqual(1);
+    await client.expire(key, 300);
+    expect(await client.objectIdleTime(key)).toBe(0);
+  });
+
+  // 7-15: at a start the previous build's keys get the TTL cap (EXPIRE, which counts as an access); when
+  // the next build starts soon after, that build looks recently used and is deferred - it must still go
+  // away once idle, without waiting for another deployment or the one-day TTL cap
+  it.fails("[7-15] a build deferred because of the TTL cap of the start before is removed by a later pass", async () => {
+    const ns = uniqueNamespace();
+    await cleanupOldBuilds(client as never, { namespace: ns, buildId: "A" });
+    await client.set(`${ns}:A:e:/page`, "x", { expiration: { type: "EX", value: 7 * 24 * 3600 } });
+    await new Promise((r) => setTimeout(r, 2100)); // A idle for 2 s
+    await cleanupOldBuilds(client as never, { namespace: ns, buildId: "B", minIdleSeconds: 2 }); // A = previous: TTL capped
+    expect(await client.ttl(`${ns}:A:e:/page`)).toBeLessThanOrEqual(24 * 3600);
+    const { done } = startCacheMaintenance({
+      config: { client: client as never, namespace: ns, buildId: "C", disabled: false, logger: false },
+      cleanup: { minIdleSeconds: 2 },
+    });
+    expect((await done).cleanup).toMatchObject({ gaveUp: false, value: { deferredBuilds: ["A"] } });
+    await waitFor(async () => (await client.exists(`${ns}:A:e:/page`)) === 0, { timeout: 6000, message: "A removed without a restart" });
+    expect(await client.zRange(`${ns}:_builds`, 0, -1)).toEqual(["B", "C"]);
   });
 
   it("[7-9] 10k keys of an old build go in UNLINK batches of at most 500", async () => {

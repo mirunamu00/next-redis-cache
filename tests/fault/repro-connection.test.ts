@@ -126,7 +126,7 @@ describe("connectRedis", () => {
     expect(await c!.ping()).toBe("PONG");
     // one warning for the outage (not one per reconnect attempt), one line for the recovery
     expect(lines.filter((l) => l.includes("unavailable") || l.includes("not connected"))).toHaveLength(1);
-    expect(lines.some((l) => l.includes("connected to") && l.includes("again"))).toBe(true);
+    expect(lines.some((l) => l.includes("connected to"))).toBe(true);
     expect(lines.join("\n")).not.toContain(":test@");
   });
 

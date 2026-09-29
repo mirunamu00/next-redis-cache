@@ -238,6 +238,22 @@ describe("startCacheMaintenance", () => {
     expect(lines.some((l) => /cleanup: deleted 3 keys; removed builds A; kept C \(current\), B \(previous\)/.test(l))).toBe(true);
   });
 
+  // 7-15 (production verification of 2.0.0-next.0): "cleanup: ... deferred (recently used) a20e5cb" and that
+  // build was never looked at again by the pod - old keys only went away through the one-day TTL cap
+  it.fails("[7-15] a build deferred at start is removed by a later pass once idle, without another start", async () => {
+    seed("A");
+    await clean("A", 1000);
+    seed("B");
+    await clean("B", 2000);
+    mini.age(HOUR);
+    mini.touch("docs:A:e:/docs/p1"); // an old instance still reads A while the new one starts
+    const { done } = startCacheMaintenance({ config: config({ logger: false }), cleanup: { minIdleSeconds: 1 } });
+    expect((await done).cleanup).toMatchObject({ gaveUp: false, value: { deferredBuilds: ["A"] } });
+    // nobody reads A any more: it is removed within minIdleSeconds (+ a margin)
+    await waitFor(() => !buildsLeft().includes("A"), { timeout: 4000, message: "A removed without a restart" });
+    expect(buildsLeft()).toEqual(["B"]);
+  });
+
   it("skips without a client or while disabled, and never rejects", async () => {
     expect(await startCacheMaintenance({ config: config({ client: null, logger: false }) }).done).toEqual({ skipped: "no-client" });
     expect(await startCacheMaintenance({ config: config({ disabled: true }) }).done).toEqual({ skipped: "disabled" });

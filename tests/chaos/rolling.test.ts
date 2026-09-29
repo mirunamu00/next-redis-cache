@@ -1,8 +1,8 @@
-// Chaos C11 / C12 - rolling update A -> B and rollback B -> A with the README's startup cleanup
-// (cleanupOldBuildKeys keepPrefix = own build) and prewarm, like the docs app on 1.x (ROADMAP.md 7-9).
+// Chaos C11 / C12 - rolling update A -> B and rollback B -> A with startup cleanup and prewarm (ROADMAP.md 7-9).
 // Kubernetes semantics: maxSurge 1, maxUnavailable 0 - old instances keep serving until replaced.
-import { afterAll, beforeAll, describe, expect } from "vitest";
-import { itRepro } from "../support/repro";
+// 1.x deleted the old build's keys at startup and a miss became a 404; in 2.x every prerendered page has an
+// answer from the build output, whatever happens to the keys.
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { launch, traffic, type Fleet } from "./harness";
 
 const DOCS = ["/about", "/docs/guide/doc-0", "/docs/reference/doc-1", "/docs/tutorial/doc-2", "/docs/ops/doc-3", "/docs/api/section-1/doc-4", "/docs/concepts/doc-5"];
@@ -25,13 +25,13 @@ async function rollTo(build: string) {
 }
 
 describe("rolling updates with startup cleanup", () => {
-  itRepro("7-9", "C11 rolling A -> B: old instances keep answering 200 while they drain (I1)", async () => {
+  it("[7-9] C11 rolling A -> B: old instances keep answering 200 while they drain (I1)", async () => {
     const { result, builds } = await rollTo("B");
     expect(builds).toEqual(["B", "B"]);
     expect(result.failures).toEqual([]);
   });
 
-  itRepro("7-9", "C12 rollback B -> A: every response stays 200 (I1)", async () => {
+  it("[7-9] C12 rollback B -> A: every response stays 200 (I1)", async () => {
     const { result, builds } = await rollTo("A");
     expect(builds).toEqual(["A", "A"]);
     expect(result.failures).toEqual([]);

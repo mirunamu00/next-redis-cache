@@ -1,8 +1,7 @@
 // Chaos C6 (cache wiped under traffic) and C13 (invalidation during a slow render) - ROADMAP.md 7-6.
-import { afterAll, beforeAll, describe, expect } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { createClient } from "@redis/client";
 import { dropNamespace } from "../../scripts/fleet.mjs";
-import { itRepro } from "../support/repro";
 import { directRedisUrl, launch, sleep, traffic, type Fleet } from "./harness";
 
 let admin: ReturnType<typeof createClient>;
@@ -18,7 +17,7 @@ afterAll(() => {
 });
 
 describe("C6 the cache is wiped (FLUSHALL of the namespace) under traffic", () => {
-  itRepro("7-6", "C6 prerendered docs keep answering 200 (I1)", async () => {
+  it("[7-6] C6 prerendered docs keep answering 200 (I1)", async () => {
     const fleet = await launch("static-site", { env: { NRC_PREWARM: "1" } });
     try {
       const paths = ["/about", "/docs/guide/doc-0", "/docs/reference/doc-1", "/docs/tutorial/doc-2", "/docs/ops/doc-3", "/docs/api/section-1/doc-4", "/docs/concepts/doc-5"];
@@ -35,7 +34,7 @@ describe("C6 the cache is wiped (FLUSHALL of the namespace) under traffic", () =
 });
 
 describe("C13 invalidation lands while a slow render is in flight", () => {
-  itRepro("7-6", "C13 the render that started before the invalidation is not served as fresh afterwards (I5)", async () => {
+  it("[7-6] C13 the render that started before the invalidation is not served as fresh afterwards (I5)", async () => {
     const fleet: Fleet = await launch("full-legacy", { instances: 1 });
     try {
       const origin = fleet.origin!;

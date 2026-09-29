@@ -1,5 +1,6 @@
-// Known-bug reproductions on full-legacy (ROADMAP.md 7-6). Expected failures on 1.x until P2.
-import { expect, getPage, repro, test } from "../fixtures";
+// Regressions on full-legacy (ROADMAP.md 7-6, A7). Expected failures on 1.x, fixed in 2.0: invalidations mark
+// tags stale/expired instead of deleting entries, so a dynamicParams=false page is served stale, never 404.
+import { expect, getPage, test } from "../fixtures";
 import { waitFor } from "../../support/wait-for";
 
 /** Polls until `page` serves `version`; the error lists every status seen on the way. */
@@ -25,9 +26,8 @@ async function invalidate(fleet: import("../fixtures").Fleet, query: string) {
   expect(res.status).toBe(200);
 }
 
-test.describe("full-legacy reproductions", () => {
+test.describe("full-legacy regressions", () => {
   test("[7-6] revalidatePath on a dynamicParams=false page keeps answering 200, then serves the new data", async ({ fleet }) => {
-    repro("7-6", "1.x deletes the entry; the miss on a dynamicParams=false page becomes a 404");
     expect((await getPage(fleet, "/pinned/4")).status).toBe(200);
     fleet.origin!.bump("pinned-4");
     await invalidate(fleet, "path=/pinned/4");
@@ -36,8 +36,6 @@ test.describe("full-legacy reproductions", () => {
   });
 
   test("[7-6] revalidateTag(tag, 'max') on a pinned page serves stale, then the new data (never 404)", async ({ fleet }) => {
-    // Was filed under 7-1; since 1.1.0 records no future time the remaining cause is 7-6 (P2).
-    repro("7-6", "1.x ignores the profile and deletes tagged entries, so the dynamicParams=false page 404s");
     expect((await getPage(fleet, "/pinned/5")).status).toBe(200);
     fleet.origin!.bump("pinned-5");
     await invalidate(fleet, "tag=pinned-5&profile=max");

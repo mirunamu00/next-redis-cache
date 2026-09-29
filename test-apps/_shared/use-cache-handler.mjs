@@ -1,9 +1,10 @@
 // "use cache" handler for the test apps (next.config `cacheHandlers.default` and `.remote`).
 //
-// NRC_API=v1 follows the 1.x README (Quick Start, Step 2): no-op handler during the build or without
-// REDIS_URL, otherwise a client with default options and a top-level `await client.connect()`.
+// NRC_API=v2 (default): createUseCacheHandler(config) - the handler connects lazily (connectRedis) and is
+// a no-op during the build by itself. NRC_API=v1 follows the 1.x README (Quick Start, Step 2): no-op
+// handler during the build or without REDIS_URL, otherwise a top-level `await client.connect()`.
 // Operation counters wrap the handler methods without changing their behavior.
-import { assertApi, isBuildPhase, redisUrl, v1KeyPrefix } from "./config.mjs";
+import { assertApi, isBuildPhase, redisUrl, v1KeyPrefix, v2Config } from "./config.mjs";
 import { count, observeClient, recordError } from "./test-hooks.mjs";
 
 const noop = {
@@ -63,7 +64,8 @@ if (assertApi() === "v1") {
     });
   }
 } else {
-  throw new Error("NRC_API=v2 adapter is not implemented yet (lands with the 2.x API in P2)");
+  const { createUseCacheHandler } = await import("@mirunamu/next-redis-cache/use-cache");
+  handler = createUseCacheHandler(await v2Config());
 }
 
 export default instrument(handler);

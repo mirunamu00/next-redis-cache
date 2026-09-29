@@ -101,7 +101,7 @@ describe("7-11 TTL policy", () => {
       { kind: "APP_PAGE", html: "x", rscData: Buffer.from("r"), headers: {}, status: 200 },
       { op: "reseed", onlyIfAbsent: true },
     );
-    expect(stored).toBe(true);
+    expect(stored).toBe("stored");
     expect(ttlOf(fake.calls)).toBe(3600);
   });
 });

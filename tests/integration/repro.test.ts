@@ -234,7 +234,7 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       await core.write("/page", { lastModified: 1, tags: ["a"], revalidate: false }, appPageValue("<p>a</p>"), { op: "set" });
       const ttl = await client.pTTL(entryKey(ns, "b1", "/page"));
       const took = await core.write("/page", { lastModified: 2, tags: ["b"], revalidate: 5 }, appPageValue("<p>b</p>"), { op: "reseed", onlyIfAbsent: true });
-      expect(took).toBe(false);
+      expect(took).toBe("exists");
       const raw = await client.withTypeMapping({ 36: Buffer }).get(entryKey(ns, "b1", "/page"));
       const { meta, value } = await decodeEnvelope<{ tags: string[] }>(raw as unknown as Buffer);
       expect(meta.tags).toEqual(["a"]);

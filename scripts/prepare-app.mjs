@@ -5,7 +5,7 @@
 //     --pkg local                package under test: local (npm pack of this repo), npm:<version>, or a .tgz path
 //     --no-pack                  with --pkg local: reuse .artifacts/nrc-local.tgz as is (CI downloads it)
 //     --build A[,B]              next build once per build id; each result lands in builds/<id>/
-//     --api v1                   NRC_API baked into the build (v1 now, v2 from P2)
+//     --api v2                   NRC_API baked into the build: v2 (2.x API, default) or v1 (1.x package baselines)
 //     --hot-dist                 copy the current dist/ into the installed package (and existing builds)
 //                                instead of reinstalling - local fast iteration only, CI always uses tarballs
 //
@@ -216,7 +216,7 @@ function warmFiles(dir) {
  * Programmatic entry point (also used by the e2e/chaos harness).
  * @param {{ app: string, variant?: string, pkg?: string, pack?: boolean, builds?: string[], api?: string, hotDist?: boolean }} o
  */
-export async function prepareApp({ app, variant = DEFAULT_VARIANT, pkg = "local", pack = true, builds = [], api = "v1", hotDist: hot = false }) {
+export async function prepareApp({ app, variant = DEFAULT_VARIANT, pkg = "local", pack = true, builds = [], api = "v2", hotDist: hot = false }) {
   assertApp(app);
   assertVariant(variant);
   const dir = appWorkDir(app, variant);
@@ -242,13 +242,13 @@ if (process.argv[1] && fileURLToPath(import.meta.url) === path.resolve(process.a
       pkg: { type: "string", default: "local" },
       "no-pack": { type: "boolean", default: false },
       build: { type: "string" },
-      api: { type: "string", default: "v1" },
+      api: { type: "string", default: "v2" },
       "hot-dist": { type: "boolean", default: false },
     },
   });
   const target = positionals[0];
   if (!target) {
-    console.error("usage: node scripts/prepare-app.mjs <app|all> [--variant next-16.3] [--pkg local|npm:1.0.6|file.tgz] [--build A,B] [--api v1] [--hot-dist] [--no-pack]");
+    console.error("usage: node scripts/prepare-app.mjs <app|all> [--variant next-16.3] [--pkg local|npm:1.0.6|file.tgz] [--build A,B] [--api v2|v1] [--hot-dist] [--no-pack]");
     process.exit(1);
   }
   const apps = target === "all" ? APPS : [target];

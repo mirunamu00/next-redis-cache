@@ -35,6 +35,16 @@ export async function freePort() {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+/**
+ * Waits until the load balancer has no request in flight to `inst` (at most `timeoutMs`), like the
+ * endpoint removal + graceful termination of a Kubernetes pod: stop routing first, then let running
+ * requests finish, then stop the process.
+ */
+async function drain(inst, timeoutMs = 10_000) {
+  const deadline = Date.now() + timeoutMs;
+  while ((inst.inflight ?? 0) > 0 && Date.now() < deadline) await sleep(20);
+}
+
 /** Deletes every key of a fleet namespace (SCAN + UNLINK). Returns the number of deleted keys. */
 export async function dropNamespace(redisUrl, namespace) {
   if (!redisUrl) return 0;
@@ -79,7 +89,7 @@ export async function startInstance({ dir, id, env, logDir, readyTimeoutMs = 120
       PORT: String(port),
       INSTANCE_ID: id,
       BUILD_ID: meta.buildId ?? "default",
-      NRC_API: meta.api ?? "v1",
+      NRC_API: meta.api ?? "v2",
       ...env,
     },
     stdio: ["ignore", "pipe", "pipe"],
@@ -164,6 +174,9 @@ async function startBalancer(pool, port) {
       return;
     }
     const target = targets[next++ % targets.length];
+    // In-flight requests per instance: a rolling update drains an instance before stopping it
+    target.inflight = (target.inflight ?? 0) + 1;
+    res.once("close", () => (target.inflight -= 1));
     const upstream = http.request(
       { host: "127.0.0.1", port: target.port, method: req.method, path: req.url, headers: req.headers },
       (up) => {
@@ -276,11 +289,13 @@ export async function startFleet({
     start: launch,
     async stopInstance(inst) {
       inst.routable = false;
+      await drain(inst);
       await inst.stop();
     },
     /**
      * Rolling update to `build` (maxSurge 1, maxUnavailable 0): for each current instance, start one
-     * new instance, wait until it is ready, route to it, then drain and stop one old instance.
+     * new instance, wait until it is ready, route to it, then stop routing to one old instance, wait for
+     * its in-flight requests (drain) and stop it.
      * `onStep` runs after each replacement (tests use it to send traffic mid-rollout).
      */
     async rolling(build, { onStep, extraEnv } = {}) {
@@ -288,6 +303,7 @@ export async function startFleet({
       for (const o of old) {
         await launch(build, extraEnv);
         o.routable = false;
+        await drain(o);
         await o.stop();
         if (onStep) await onStep(fleet);
       }

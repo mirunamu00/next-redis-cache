@@ -18,6 +18,7 @@
  * the render is running is newer than the entry, so the entry is served stale and regenerated again
  * instead of passing as fresh (7-6, chaos C13).
  */
+import { BUILD_OUTPUT_KINDS, BuildOutput, type BuildOutputEntry } from "./build-output";
 import { buildIdResolver, resolveConfig, type ResolvedConfig } from "./config";
 import { decodeEnvelope, encodeEnvelope, EnvelopeFormatError } from "./envelope";
 import { entryKey, tagStateKey } from "./keys";
@@ -90,6 +91,8 @@ export class LegacyCore {
   readonly runner: Runner;
   readonly reporter: FailureReporter;
   readonly #renders = new RenderStarts();
+  readonly #reseeding = new Set<string>();
+  #output: BuildOutput | null | undefined;
   readonly #buildId: (distDir?: string) => string;
   /** First non-empty context seen (Next passes the same one to every instance). */
   context: LegacyHandlerContext = {};
@@ -192,11 +195,79 @@ export class LegacyCore {
     return { lastModified: -1, value };
   }
 
-  /** A Redis miss (absent, unreadable or unavailable). */
-  async miss(cacheKey: string, _ctx: LegacyGetContext, reason: "absent" | "unavailable" | "error" | "format"): Promise<LegacyCacheValue | null> {
-    this.#renders.mark(cacheKey, Date.now());
-    this.cfg.emit({ type: "miss", handler: "legacy", key: cacheKey, reason });
-    return null;
+  /**
+   * The build output this handler may fall back to: production server only (not dev, not during the
+   * build), with Next's serverDistDir known and the fallback enabled.
+   */
+  buildOutput(): BuildOutput | null {
+    if (this.#output !== undefined) return this.#output;
+    const { serverDistDir, dev, fs } = this.context;
+    if (!serverDistDir) return null; // not known yet: decide on a later call
+    this.#output = this.cfg.buildOutput && !dev ? new BuildOutput(serverDistDir, fs, this.cfg.logger) : null;
+    return this.#output;
+  }
+
+  /**
+   * A Redis miss (absent, unreadable or unavailable). Prerendered pages and route handlers are then
+   * served from the build output, checked against the tag state:
+   *   fresh    -> served with the file time as lastModified, and re-seeded into Redis (SET NX)
+   *   stale    -> served with lastModified -1: Next answers with it and regenerates in the background
+   *   unknown  -> (Redis unavailable) served as it is
+   */
+  async miss(cacheKey: string, ctx: LegacyGetContext, reason: "absent" | "unavailable" | "error" | "format"): Promise<LegacyCacheValue | null> {
+    const cfg = this.cfg;
+    const now = Date.now();
+    this.#renders.mark(cacheKey, now);
+    const output = !cfg.isDisabled() && ctx.kind && BUILD_OUTPUT_KINDS.has(ctx.kind) ? this.buildOutput() : null;
+    const entry = output ? await output.read(cacheKey, { kind: ctx.kind!, isRoutePPREnabled: ctx.isRoutePPREnabled, isFallback: ctx.isFallback }) : null;
+    if (!output || !entry) {
+      cfg.emit({ type: "miss", handler: "legacy", key: cacheKey, reason });
+      return null;
+    }
+
+    const tags = unique(headerTags(entry.value.headers), ctx.softTags);
+    let state: "fresh" | "stale" | "expired" | "unknown" = "fresh";
+    if (tags.length > 0) {
+      if (reason === "unavailable" || reason === "error" || !this.runner.usable()) state = "unknown";
+      else {
+        try {
+          const fields = await this.runner.run("read", (client) => client.hmGet(tagStateKey(cfg.namespace), tagFields(tags)) as Promise<unknown[]>);
+          const table = parseTagFields(tags, fields);
+          if (areTagsExpired(tags, table, entry.lastModified, now)) state = "expired";
+          else if (areTagsStale(tags, table, entry.lastModified)) state = "stale";
+        } catch (err) {
+          this.#failed("get", cacheKey, err);
+          state = "unknown";
+        }
+      }
+    }
+    if (state === "expired" && cfg.onTagExpired === "miss") {
+      cfg.emit({ type: "miss", handler: "legacy", key: cacheKey, reason: "tag" });
+      return null;
+    }
+    if (state === "expired" || state === "stale") {
+      cfg.emit({ type: "fallback", handler: "legacy", key: cacheKey, state: "stale" });
+      return { lastModified: -1, value: entry.value };
+    }
+    cfg.emit({ type: "fallback", handler: "legacy", key: cacheKey, state });
+    if (state === "fresh") this.#reseed(cacheKey, entry, output);
+    return { lastModified: entry.lastModified, value: entry.value };
+  }
+
+  /** Writes a fresh build-output entry back to Redis in the background (never over a newer entry). */
+  #reseed(cacheKey: string, entry: BuildOutputEntry, output: BuildOutput): void {
+    if (!this.cfg.reseed || this.#reseeding.has(cacheKey) || !this.runner.usable()) return;
+    this.#reseeding.add(cacheKey);
+    void (async () => {
+      const revalidate = await output.revalidateOf(cacheKey);
+      if (revalidate === undefined) return; // not a prerendered route of this build
+      const meta = { lastModified: entry.lastModified, tags: headerTags(entry.value.headers), revalidate };
+      if ((await this.write(cacheKey, meta, entry.value, { op: "reseed", onlyIfAbsent: true })) === "stored") {
+        this.cfg.emit({ type: "reseed", handler: "legacy", key: cacheKey });
+      }
+    })()
+      .catch(() => undefined)
+      .finally(() => this.#reseeding.delete(cacheKey));
   }
 
   async set(cacheKey: string, data: unknown, ctx: LegacySetContext = {}): Promise<void> {
@@ -211,8 +282,13 @@ export class LegacyCore {
     await this.write(cacheKey, { lastModified, tags, revalidate }, data, { op: "set" });
   }
 
-  /** Encodes and stores one entry. Never throws; returns whether Redis took it. */
-  async write(cacheKey: string, meta: LegacyMeta, value: unknown, { op, onlyIfAbsent = false }: { op: string; onlyIfAbsent?: boolean }): Promise<boolean> {
+  /** Encodes and stores one entry. Never throws. "exists": skipped by onlyIfAbsent. */
+  async write(
+    cacheKey: string,
+    meta: LegacyMeta,
+    value: unknown,
+    { op, onlyIfAbsent = false }: { op: string; onlyIfAbsent?: boolean },
+  ): Promise<"stored" | "exists" | "failed"> {
     const cfg = this.cfg;
     try {
       await this.runner.available(); // fail fast, before serializing, while Redis is unavailable
@@ -221,11 +297,12 @@ export class LegacyCore {
       const ttl = ttlSeconds(cfg, meta.revalidate);
       const reply = await this.runner.run("write", (client) => client.set(key, body, setOptions(ttl, onlyIfAbsent)));
       this.reporter.success();
-      if (reply !== null) cfg.emit({ type: "set", handler: "legacy", key: cacheKey, bytes: body.byteLength });
-      return reply !== null;
+      if (reply === null) return "exists";
+      cfg.emit({ type: "set", handler: "legacy", key: cacheKey, bytes: body.byteLength });
+      return "stored";
     } catch (err) {
       this.#failed(op, cacheKey, err);
-      return false;
+      return "failed";
     }
   }
 

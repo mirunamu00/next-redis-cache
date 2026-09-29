@@ -1,12 +1,18 @@
 # CI - quality gate (ROADMAP.md section 6.8)
 #
-# Job graph at this stage (P0b):
+# Job graph (P0c):
 #   static (no-hangul, lint, typecheck, build, quality) --+
 #   unit (Node 22, 24)                                    |
-#   unit-windows (layers that need no Docker)             +-- gate (the only required check for branch protection)
-#   integration (Redis 7.2, 8.4 via testcontainers)       |
-#   fault (mini-redis + toxiproxy from docker compose)  --+
-# contract/e2e (P0c) join this graph in later stages.
+#   unit-windows (layers that need no Docker)             |
+#   integration (Redis 7.2, 8.4 via testcontainers)       +-- gate (the only required check for branch protection)
+#   fault (mini-redis + toxiproxy from docker compose)    |
+#   setup (build + npm pack -> tarball artifact)          |
+#     |- contract (tsc per Next variant)                  |
+#     |- e2e (app x Next x Redis, Playwright + fleet)   --+
+#
+# level=pr (push, pull_request): e2e = 3 apps x Next 16.3 x Redis 8.4, contract = 16.1 + 16.3.
+# level=full (workflow_call from nightly/release): e2e = 3 apps x [16.1, 16.3] x [7.2, 8.4], contract + canary
+# (canary is allowed to fail, Q15). Test apps install the tarball from setup, never the working tree.
 # GitHub Windows runners cannot run Linux containers, so Docker layers run on Linux only (Q17).
 #
 # Node 20 is not in the matrix: it reached EOL on 2026-04-30 and the test tooling (vitest 5, size-limit 14)
@@ -153,10 +159,110 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
 
+  setup:
+    name: setup (build + pack)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - name: Pack the package under test
+        run: node scripts/pack.mjs --no-build
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: package-tarball
+          path: .artifacts/nrc-local.tgz
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 7
+
+  contract:
+    name: contract-types (${{ matrix.variant }})
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: ${{ matrix.variant == 'canary' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        variant: ${{ fromJSON(inputs.level == 'full' && '["next-16.1","next-16.3","canary"]' || '["next-16.1","next-16.3"]') }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            test-apps/_variants/*/package-lock.json
+      - run: npm ci
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: package-tarball
+          path: .artifacts
+      - run: node scripts/contract-types.mjs --variant ${{ matrix.variant }} --no-pack
+
+  e2e:
+    name: e2e (${{ matrix.app }}, ${{ matrix.variant }}, Redis ${{ matrix.redis }})
+    needs: setup
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        app: [static-site, full-legacy, full-cc]
+        variant: ${{ fromJSON(inputs.level == 'full' && '["next-16.1","next-16.3"]' || '["next-16.3"]') }}
+        redis: ${{ fromJSON(inputs.level == 'full' && '["7.2","8.4"]' || '["8.4"]') }}
+    env:
+      NRC_NEXT_VARIANT: ${{ matrix.variant }}
+      NRC_E2E_REDIS: ${{ matrix.redis == '7.2' && 'redis72' || 'redis84' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            test-apps/_variants/*/package-lock.json
+      - run: npm ci
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: package-tarball
+          path: .artifacts
+      - name: Start infrastructure
+        run: npm run infra:up -- ${{ env.NRC_E2E_REDIS }} toxiproxy
+      - name: Assemble and build the test app (tarball install, standalone output)
+        run: node scripts/prepare-app.mjs ${{ matrix.app }} --variant ${{ matrix.variant }} --no-pack --build A
+      - name: e2e
+        run: npx playwright test --project ${{ matrix.app }}
+      - name: Infrastructure logs
+        if: failure()
+        run: npm run infra:logs
+      - name: Stop infrastructure
+        if: always()
+        run: npm run infra:down
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: e2e-${{ matrix.app }}-${{ matrix.variant }}-redis${{ matrix.redis }}
+          path: |
+            reports/
+            test-results/
+            .work/logs/
+          include-hidden-files: true
+          if-no-files-found: ignore
+          retention-days: 14
+
   gate:
     name: gate
     if: always()
-    needs: [static, unit, unit-windows, integration, fault]
+    needs: [static, unit, unit-windows, integration, fault, setup, contract, e2e]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

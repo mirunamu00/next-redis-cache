@@ -1,5 +1,5 @@
-// Mutation testing (ROADMAP.md section 6.5, weekly). Report-only until 2.0.0 (Q13): thresholds are
-// shown in the report but `break` is null, so the run never fails on the score.
+// Mutation testing (ROADMAP.md section 6.5, weekly). Blocking from 2.0.0 (Q13): a score below `break`
+// (70%) makes `stryker run` exit 1, which fails the weekly nightly job and files the nightly-failure issue.
 //
 // Runner: the generic command runner executes the docker-free test set (vitest.mutation.config.ts)
 // once per mutant. @stryker-mutator/vitest-runner 10.0.0 completes the dry run with vitest 5 but then
@@ -14,7 +14,7 @@ export default {
   reporters: ["clear-text", "progress", "html", "json"],
   htmlReporter: { fileName: "reports/mutation/index.html" },
   jsonReporter: { fileName: "reports/mutation/mutation.json" },
-  thresholds: { high: 80, low: 70, break: null },
+  thresholds: { high: 80, low: 70, break: 70 },
   timeoutMS: 60_000,
   concurrency: 4,
   // The sandbox copy only needs sources, tests and configs

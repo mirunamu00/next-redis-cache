@@ -2,7 +2,7 @@
 #
 #   daily   ci level=full (e2e [16.1, 16.3] x [7.2, 8.4], contract + canary) + every chaos scenario
 #           + perf with timing + quarantined tests x20 + e2e on Node 24
-#   weekly  + mutation (Stryker, report-only until 2.0.0) + canary e2e (allowed to fail, Q15)
+#   weekly  + mutation (Stryker, fails below a 70% score since 2.0.0, Q13) + canary e2e (allowed to fail, Q15)
 #   failure of a scheduled run opens or updates an issue labelled nightly-failure
 #
 # Schedules only run on the default branch. To validate changes to this file (or chaos.yml) before
@@ -110,7 +110,7 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - name: Stryker (report-only until 2.0.0)
+      - name: Stryker (exits 1 below thresholds.break = 70%)
         run: npm run test:mutation
       - if: always()
         run: node scripts/mutation-summary.mjs

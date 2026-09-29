@@ -29,6 +29,11 @@ describe("coverageFailures", () => {
     expect(coverageFailures(summary, (f) => f.replace("/r/", ""))).toEqual(["src/b.ts: lines 79.9% < 80%"]);
   });
 
+  it("skips files without any line to cover (re-export-only entries are reported as 0 of 0 = 0%)", () => {
+    const empty = { lines: { total: 0, covered: 0, skipped: 0, pct: 0 }, statements: metric(0), branches: metric(0), functions: metric(0) };
+    expect(coverageFailures({ total: entry(97), "/r/src/index.ts": empty })).toEqual([]);
+  });
+
   it("fails on a report without totals or with missing metrics", () => {
     expect(coverageFailures({})).toEqual(["the report has no total"]);
     expect(coverageFailures({ total: { lines: metric(99) } } as never)).toHaveLength(2);

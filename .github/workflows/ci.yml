@@ -9,8 +9,9 @@
 #   setup (build + npm pack -> tarball artifact)                      |
 #     |- contract (tsc per Next variant)                              |
 #     |- e2e (app x Next x Redis, Playwright + fleet)                 |
-#     |- perf (deterministic gate vs tests/perf/baseline)           --+
-#   coverage (merges the unit/integration/fault blob reports; report-only, outside the gate)
+#     |- perf (deterministic gate vs tests/perf/baseline)             |
+#   coverage (merges the unit/integration/fault blob reports;       --+
+#             lines 90 / branches 85 / functions 90, every file lines >= 80 - blocking from 2.0.0, Q13)
 #
 # level=pr (push, pull_request): e2e = 3 apps x Next 16.3 x Redis 8.4, contract = 16.1 + 16.3.
 # level=full (workflow_call from nightly/release): e2e = 3 apps x [16.1, 16.3] x [7.2, 8.4], contract + canary
@@ -201,7 +202,7 @@ jobs:
           retention-days: 14
 
   coverage:
-    name: coverage (unit + property + contract + integration + fault, report-only)
+    name: coverage (merged layers, thresholds)
     needs: [unit, integration, fault]
     if: always()
     runs-on: ubuntu-latest
@@ -220,9 +221,9 @@ jobs:
           merge-multiple: true
       - name: Merge blob reports (coverage of every docker and docker-free layer)
         run: npx vitest run --merge-reports .artifacts/layers/reports/blob --coverage
-      - name: Summary
+      - name: Summary and thresholds (scripts/lib/coverage-rules.mjs)
         if: always()
-        run: node scripts/coverage-summary.mjs
+        run: node scripts/coverage-summary.mjs --check
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
@@ -378,7 +379,7 @@ jobs:
   gate:
     name: gate
     if: always()
-    needs: [static, unit, unit-windows, integration, fault, setup, contract, e2e, perf]
+    needs: [static, unit, unit-windows, integration, fault, coverage, setup, contract, e2e, perf]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

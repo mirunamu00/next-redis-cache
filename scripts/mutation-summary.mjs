@@ -1,6 +1,10 @@
 // Mutation score per file from Stryker's JSON report (reports/mutation/mutation.json), written to
-// $GITHUB_STEP_SUMMARY (or stdout). Report-only until 2.0.0 (Q13); the target is >= 70%.
+// $GITHUB_STEP_SUMMARY (or stdout). Blocking from 2.0.0 (Q13): Stryker itself exits 1 below
+// thresholds.break in stryker.config.mjs (70%); this summary shows the same score per file.
 import { appendFileSync, existsSync, readFileSync } from "node:fs";
+import stryker from "../stryker.config.mjs";
+
+const BREAK = stryker.thresholds.break;
 
 const file = process.argv[2] ?? "reports/mutation/mutation.json";
 if (!existsSync(file)) {
@@ -23,7 +27,7 @@ for (const [name, f] of Object.entries(report.files).sort()) {
 }
 const score = valid ? (detected / valid) * 100 : 0;
 const md = [
-  `### mutation score ${score.toFixed(1)}% (target 70%, blocking from 2.0.0)`,
+  `### mutation score ${score.toFixed(1)}% (${score >= BREAK ? "passed" : "FAILED"}, break ${BREAK}%)`,
   "",
   "| file | mutants | detected | score |",
   "|---|---|---|---|",

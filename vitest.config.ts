@@ -30,7 +30,9 @@ export default defineConfig({
       exclude: ["src/types.ts"],
       reporter: ["text", "lcov", "html", "json-summary"],
       reportsDirectory: "coverage",
-      // Thresholds become blocking from 2.0.0 (Q13). Until then coverage is report-only.
+      // No thresholds here: a single layer alone never reaches them (integration does not exercise the
+      // fallback paths, unit does not talk to real Redis). The ci `coverage` job gates the merged report of
+      // every layer with scripts/coverage-summary.mjs --check (scripts/lib/coverage-rules.mjs, Q13).
     },
     projects: [
       {

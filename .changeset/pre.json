@@ -1,0 +1,8 @@
+{
+  "mode": "pre",
+  "tag": "next",
+  "initialVersions": {
+    "@mirunamu/next-redis-cache": "1.1.0"
+  },
+  "changesets": []
+}

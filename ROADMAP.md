@@ -204,7 +204,9 @@ next-redis-cache/
 │  ├─ static-site/  full-legacy/  full-cc/  _shared/
 │  └─ _variants/{next-16.1,next-16.3,canary}/   # 버전별 package.json(+lock)
 ├─ scripts/                  # 전부 Node .mjs
-│  ├─ check-pack.mjs  size.mjs  infra.mjs
+│  ├─ check-pack.mjs  check-no-hangul.mjs  quality.mjs  coverage-summary.mjs  (P0a)
+│  ├─ infra.mjs  test-all.mjs  (P0b)
+│  ├─ lib/{run,pack-rules,hangul-rules}.mjs
 │  ├─ pack.mjs  prepare-app.mjs  origin-server.mjs  fleet.mjs  ci-matrix.mjs   (P0c~)
 ├─ docker/
 │  ├─ compose.yml            # 프로필: redis84, redis72, prodlike, toxiproxy, replica
@@ -214,7 +216,8 @@ next-redis-cache/
 ```
 
 - npm workspaces 미사용(앱별 Next 버전 충돌, 심링크 문제). 테스트 앱은 독립 npm 프로젝트, 루트 스크립트가 조립.
-- 게시물 격리: `files:["dist"]` + `check-pack.mjs`가 `npm pack --dry-run --json` 목록을 `dist/**`, `README.md`, `LICENSE`, `package.json` 화이트리스트와 대조(PR 게이트).
+- 게시물 격리: `files:["dist"]` + `check-pack.mjs`가 `npm pack --dry-run --json` 목록을 `dist/**`, `README.md`, `LICENSE`, `package.json` 화이트리스트와 대조(PR 게이트). exports·main·module·types가 가리키는 파일 누락도 실패.
+- **코드는 영어만(2026-09-29 사용자 결정)**: `.md`를 제외한 모든 파일(src·tests·test-apps·scripts·docker·workflow·설정)에 한글(U+1100–U+11FF, U+3130–U+318F, U+AC00–U+D7AF)이 있으면 `check-no-hangul.mjs`가 실패한다. 주석·JSDoc·문자열·테스트 이름 모두 해당. 마크다운 문서(ROADMAP·README·CHANGELOG)와 커밋 메시지는 한국어 유지. `quality`와 CI static job에 연결. 추적 파일 + 무시되지 않은 미추적 파일을 검사해 커밋 전에도 잡는다.
 
 ### 6.2 테스트 앱의 패키지 소비
 
@@ -244,6 +247,13 @@ next-redis-cache/
   - `replica`(선택): 복제 구성만 흉내(failover 비목표)
   - 기본 bridge + 포트 매핑(`network_mode: host` 금지 — Windows 미지원)
 - **역할 분담**: testcontainers = integration(파일 단위 자립, 무작위 포트, 버전 파라미터화) / compose = e2e·chaos·perf·fault(toxiproxy)·수동 디버깅.
+- **P0b 구현 세부(확정)**
+  - compose 프로젝트명 `nrc`. 호스트 포트 기본값: redis84 `6384`, redis72 `6372`, prodlike `6390`, replica `6391`, toxiproxy API `8474`, 정적 프록시 `26384`(→redis84)·`26390`(→prodlike). 각각 `NRC_*_PORT` env로 덮어쓰기.
+  - `infra:up` 기본 프로필 = redis84·redis72·toxiproxy. `npm run infra:up -- prodlike`처럼 인자로 지정, `all`은 전부. prodlike는 `prodlike`·`replica` 두 프로필에 속한다(replica의 primary). `infra:down`은 모든 프로필 + 볼륨 삭제.
+  - toxiproxy 격리: vitest 워커마다 전용 프록시 `nrc_w<poolId>`를 `26399+poolId` 포트에 만든다(26400–26415 매핑 → **워커 최대 16개**). 한 워커 안의 테스트 파일은 순차라 프록시를 동시에 공유하지 않는다. 전역 `/reset`은 병렬 테스트에서 쓰지 않는다.
+  - Redis 버전 선택: `NRC_REDIS_VERSIONS`(쉼표 목록, 기본 `8.4,7.2`). CI는 셀마다 하나.
+  - testcontainers는 `~12.0.4` 고정 — 12.1+는 `engines.node >=22.22`라 로컬 Node 22.21에서 경고. 로컬 Node를 22.22+로 올리면 해제 가능.
+  - mini-redis TS 포팅은 원본 대비 값 바이너리 안전(Buffer 저장), `AUTH`(password 옵션)·`PTTL`·`SET PX`·`DBSIZE`·`HGETALL`·`FLUSHDB` 추가, `connectionCount()`·`getBuffer()` 추가.
 - **멀티 인스턴스·롤링**(`scripts/fleet.mjs`, P0c): BUILD_ID A/B 산출물 2벌, 인스턴스 2~3개(get-port, `INSTANCE_ID`, toxiproxy 경유 공유 Redis), 내장 라운드로빈 LB, 롤링 A→B(`maxSurge 1, maxUnavailable 0` 재현)와 롤백 B→A, 종료는 tree-kill.
 - **Windows**: 스크립트 전부 Node, `.gitattributes` eol=lf, 짧은 `.work` 경로, testcontainers는 Docker Desktop npipe. **GitHub windows 러너는 Linux 컨테이너 불가** → Windows CI는 docker 불필요 계층만.
 
@@ -251,10 +261,10 @@ next-redis-cache/
 
 | 계층 | 도구 | 목적 | 예산 | 트리거 |
 |---|---|---|---|---|
-| unit | vitest `unit`, 가짜 시계 | 키·엔벨로프·TTL·태그 판정·circuit·로거 | <30s | PR(Node 20/22/24, Windows) |
+| unit | vitest `unit`, 가짜 시계 | 키·엔벨로프·TTL·태그 판정·circuit·로거 | <30s | PR(Node 22/24, Windows) |
 | property | fast-check | 엔벨로프 왕복, TTL 단조·상한, 태그 판정 ≡ Next 참조 구현 | <30s | PR |
 | integration | testcontainers Redis 7.2/8.4 | 명령 의미, NX, TTL(`PTTL` 범위), 축출, 정리, 1만 키 배치 | <3m | PR |
-| fault | mini-redis + toxiproxy | 연결 전·끊김·재연결·무응답·지연·reset_peer, unhandledRejection 0, offline queue 폭주 0 | <3m | PR(mini-redis 부분은 Windows 포함) |
+| fault | mini-redis + toxiproxy | 연결 전·끊김·재연결·무응답·지연·reset_peer, unhandledRejection 0, offline queue 폭주 0 | <3m | PR(mini-redis 부분은 Windows 포함). vitest project `fault`(mini-redis, 도커 불필요) + `fault-docker`(파일명 `*.docker.test.ts`, compose toxiproxy 필요) |
 | contract-types | tsc 버전별 | `satisfies next/.../cache-handlers/types#CacheHandler` | <1m/버전 | PR(16.1/16.3), nightly(canary) |
 | contract-oracle | vitest + fast-check | 연산 시퀀스를 Next `createDefaultCacheHandler`와 우리 핸들러(`swr:false`)에 적용해 결과 차분 | <1m | PR |
 | e2e | Playwright + fleet 2인스턴스 | HTML·RSC·세그먼트 prefetch, SWR, 인스턴스 간 전파, 404 0, sitemap 200 | <8m/셀 | PR 16.3×8.4×3앱 / nightly 전체 |
@@ -271,7 +281,9 @@ next-redis-cache/
 ### 6.6 품질 게이트와 결정론
 
 - 커버리지(v8, unit+property+integration+fault 병합, `src/**`): lines 90 / branches 85 / functions 90, 파일별 lines ≥80 — **2.0.0 전까지 리포트만, 2.0.0부터 차단**.
-- `tsc --noEmit`(strict) + contract-types, `publint`, `attw --profile node16`(조건별 types 오류 0), `check-pack` 화이트리스트, size 예산(엔트리별 ESM min+gz, 초기 측정치 +20%), eslint 0 오류, mutation ≥70%(2.0.0부터 차단).
+- `tsc --noEmit`(strict) + contract-types, `publint`, `attw --profile node16`(조건별 types 오류 0), `check-pack` 화이트리스트, `check-no-hangul`, size 예산(엔트리별 ESM gzip, 초기 측정치 +20%), eslint 0 오류, mutation ≥70%(2.0.0부터 차단).
+  - P0a 실제값: attw는 P1(조건별 types 교정) 전까지 `false-esm` 규칙만 무시. size-limit은 `@size-limit/file`로 엔트리 파일+공유 청크의 gzip 크기를 잰다(dist가 minify되지 않으므로 "min+gz"가 아니라 배포물 그대로의 gz). 1.0.6 기준 `.` 4.12kB→예산 5kB, `./use-cache` 3.14kB→3.8kB, `./instrumentation` 1.69kB→2.1kB, CJS 합계 7.5kB→9kB. 별도 `size.mjs` 없이 `.size-limit.json`만 둔다.
+  - 커버리지는 P0a/P0b 시점 CI에서 unit+property만 수집. integration·fault 병합은 P0e(리포팅)에서.
 - flaky: 재시도 금지(`retry:0`, Playwright `retries:0`). 불안정 테스트는 `@quarantine` 태그로 게이트 제외 + 추적 이슈 + 7일 내 수정/삭제, nightly `--repeat-each=20`.
 - 리포팅: vitest JUnit·JSON·coverage(lcov/html), Playwright html+trace+JUnit, perf JSON → artifact, 요약은 `$GITHUB_STEP_SUMMARY`. 외부 서비스 없음.
 - 결정론: 패키지 시간 읽기는 내부 `clock.now()`로 모음(unit/property는 가짜 시계). 실제 시간이 필요한 곳은 sleep 대신 마감 있는 `waitFor` 폴링, TTL은 `PTTL` 범위 단언. 테스트마다 고유 네임스페이스 `t_<pid>_<seq>`, 전역 스캔 테스트는 워커별 논리 DB(`VITEST_POOL_ID % 16`) + 해당 DB만 FLUSHDB. 포트는 동적. 콘텐츠는 seed 생성기.
@@ -282,13 +294,14 @@ next-redis-cache/
 
 | 스크립트 | 내용 |
 |---|---|
-| `test` | unit + property + contract-oracle (docker 불필요) |
-| `test:unit` / `test:prop` / `test:int` / `test:fault` / `test:contract` | 계층별 |
+| `test` | unit + property + contract-oracle (docker 불필요; oracle은 P0c~) |
+| `test:unit` / `test:prop` / `test:int` / `test:fault` / `test:contract` | 계층별. `test:fault` = fault + fault-docker, `test:fault:nodocker` = mini-redis 부분만 |
+| `check-no-hangul` / `check-pack` | 개별 게이트 |
 | `test:e2e` / `test:chaos` / `test:perf` / `test:mutation` | P0c~P0e |
 | `test:all` | infra:up → 전 계층 → infra:down |
 | `infra:up` / `infra:down` / `infra:logs` / `infra:ps` / `infra:cli` | compose 관리 |
 | `apps:prepare` / `fleet` | P0c |
-| `quality` | publint + attw + size + check-pack |
+| `quality` | publint + attw + size-limit + check-pack + check-no-hangul (전부 실행 후 하나라도 실패면 실패) |
 
 ### 6.8 CI
 
@@ -296,11 +309,11 @@ next-redis-cache/
 
 ```
 setup(매트릭스 계산, pack → tgz artifact)          [P0c~]
- ├─ static: lint · typecheck · build · quality
- ├─ unit: Node [20,22,24]
- ├─ unit-windows: windows-latest Node 22 (docker 불필요 계층)
+ ├─ static: check-no-hangul · lint · typecheck · build · quality
+ ├─ unit: Node [22,24]   (Node 20은 2026-04-30 EOL이고 vitest 5·size-limit 14가 ^22.12 요구 → 제외)
+ ├─ unit-windows: windows-latest Node 22 (docker 불필요 계층: unit·property·fault(mini-redis)·check-pack)
  ├─ integration: Node 22 × Redis [7.2, 8.4]          [P0b~]
- ├─ fault: Node 22 (mini-redis + toxiproxy)         [P0b~]
+ ├─ fault: Node 22 (infra:up redis84+toxiproxy → mini-redis + toxiproxy → infra:down)   [P0b~]
  ├─ contract: Next [16.1, 16.3] (+full: canary)      [P0c~]
  ├─ e2e: pr = 16.3×8.4×3앱 / full = [16.1,16.3]×[7.2,8.4]×3앱 (+canary)   [P0c~]
  └─ gate: 필수 job 전부 성공 (브랜치 보호 required check는 이것 하나)
@@ -400,3 +413,6 @@ docs에서 이관된 검증: `prod-cache.spec.ts`(Redis 없이 200) → static-s
 | 날짜 | 단계 | 내용 |
 |---|---|---|
 | 2026-09-29 | — | 감사·계획·테스트 환경 설계 확정, 이 문서 작성 |
+| 2026-09-29 | — | 사용자 결정: 코드(비 .md 파일)는 영어만, `check-no-hangul` 게이트 추가 |
+| 2026-09-29 | P0a | 완료(로컬). typecheck·build·lint·test(35)·quality 통과, `check-pack`·`check-no-hangul` 음성 시험(위반 주입 시 exit 1) 확인. 빌드 산출물이 npm 1.0.6 tarball의 dist와 바이트 동일(=src 동작 불변). CI는 push 전이라 미실행 |
+| 2026-09-29 | P0b | 완료(로컬, Windows Docker Desktop 28.5.2). `infra:up`(기본·`all`·16mb 전환)·`infra:down`, integration 스모크 Redis 7.2.16/8.4.7 각 10건, toxic 4종(latency·timeout·reset_peer·bandwidth) 제어 스모크, fault 계층 5회 반복 무결, `test:all` 76건 통과. **Linux CI의 `infra:up`은 push 전이라 미검증** |

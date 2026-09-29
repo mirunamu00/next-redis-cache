@@ -1,0 +1,111 @@
+# CI - quality gate (ROADMAP.md section 6.8)
+#
+# Job graph at this stage (P0a):
+#   static (no-hangul, lint, typecheck, build, quality) --+
+#   unit (Node 22, 24)                                    +-- gate (the only required check for branch protection)
+#   unit-windows (layers that need no Docker)           --+
+# integration/fault (P0b) and contract/e2e (P0c) join this graph in later stages.
+#
+# Node 20 is not in the matrix: it reached EOL on 2026-04-30 and the test tooling (vitest 5, size-limit 14)
+# requires Node ^22.12. Actions are pinned to commit SHAs (protects against tag moves); the comment is the tag.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [master, next]
+  workflow_dispatch:
+  workflow_call:
+    inputs:
+      level:
+        description: "pr | full - full runs the whole matrix (meaningful from P0c on)"
+        type: string
+        default: pr
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  static:
+    name: static (lint, typecheck, build, quality)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - name: No Hangul in code
+        run: npm run check-no-hangul
+      - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
+      - run: npm run quality
+
+  unit:
+    name: unit (Node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [22, 24]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - run: npm ci
+      - name: Tests (with coverage on Node 22)
+        run: ${{ matrix.node == 22 && 'npm run test:coverage' || 'npm test' }}
+      - name: Coverage summary
+        if: matrix.node == 22 && always()
+        run: node scripts/coverage-summary.mjs
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: always()
+        with:
+          name: unit-node${{ matrix.node }}
+          path: |
+            reports/
+            coverage/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  unit-windows:
+    name: unit-windows (no-Docker layers)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npm run check-pack
+
+  gate:
+    name: gate
+    if: always()
+    needs: [static, unit, unit-windows]
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check required job results
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+        run: |
+          node -e '
+            const needs = JSON.parse(process.env.NEEDS);
+            for (const [name, v] of Object.entries(needs)) console.log(`${v.result === "success" ? "PASS" : "FAIL"}  ${name} (${v.result})`);
+            process.exit(Object.values(needs).every((v) => v.result === "success") ? 0 : 1);
+          '

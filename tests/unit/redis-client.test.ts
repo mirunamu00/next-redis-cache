@@ -1,5 +1,5 @@
-// Connection readiness check and timeout wrapper: pins 1.0.6 behavior.
-// (The timer leak, issue 7-10, is covered by the P0d reproduction tests.)
+// Connection readiness check and timeout wrapper.
+// (The timer leak, issue 7-10, is covered by tests/unit/repro.test.ts.)
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { RedisClientType } from "@redis/client";
 import { assertClientReady, withTimeout } from "../../src/redis-client";
@@ -21,6 +21,12 @@ describe("assertClientReady", () => {
 describe("withTimeout", () => {
   it("resolves with the original value when it settles in time", async () => {
     await expect(withTimeout(Promise.resolve("v"), 1000)).resolves.toBe("v");
+  });
+
+  it("rejects with the original error and clears its timer", async () => {
+    vi.useFakeTimers();
+    await expect(withTimeout(Promise.reject(new Error("boom")), 1000)).rejects.toThrow("boom");
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("rejects with a timeout error when the limit is exceeded", async () => {

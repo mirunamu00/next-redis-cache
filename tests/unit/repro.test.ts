@@ -2,7 +2,7 @@
 // behavior and is an expected failure on 1.0.6 (tests/support/repro.ts).
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { afterEach, describe, expect, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { withTimeout } from "../../src/redis-client";
 import { createUseCacheHandler } from "../../src/use-cache-handler";
 import { freshLegacy, useCacheEntry } from "../support/handlers";
@@ -87,7 +87,7 @@ describe("7-8 declared compatibility", () => {
 });
 
 describe("7-10 timeout timers", () => {
-  itRepro("7-10", "withTimeout leaves no timer behind once the command settles", async () => {
+  it("[7-10] withTimeout leaves no timer behind once the command settles", async () => {
     vi.useFakeTimers();
     await withTimeout(Promise.resolve("ok"), 5000);
     expect(vi.getTimerCount()).toBe(0);

@@ -203,7 +203,7 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
   });
 
   describe("7-9 cleanupOldBuildKeys", () => {
-    itRepro("7-9", "deletes in batches of at most 500 keys", async () => {
+    it("[7-9] deletes in batches of at most 500 keys", async () => {
       const ns = uniqueNamespace();
       const multi = client.multi();
       for (let i = 0; i < 10_000; i++) multi.set(`${ns}:old:k${i}`, "x", { expiration: { type: "EX", value: 600 } });
@@ -220,7 +220,7 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       expect((await calls()) - before).toBeGreaterThanOrEqual(20);
     });
 
-    itRepro("7-9", "overlapping patterns delete and count every key once", async () => {
+    it("[7-9] overlapping patterns delete and count every key once", async () => {
       const ns = uniqueNamespace();
       for (let i = 0; i < 100; i++) await client.set(`${ns}:old:k${i}`, "x", { expiration: { type: "EX", value: 600 } });
       const { cleanupOldBuildKeys } = await freshInstrumentation();

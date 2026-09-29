@@ -75,13 +75,17 @@ describe("7-2 connection wiring from the README", () => {
     await expect(handler.get("/page", {})).resolves.toBeNull();
   });
 
-  itRepro("7-2", "cleanupOldBuildKeys gives up within 3s when Redis is unreachable", async () => {
+  // Fixed in 1.1.0 by 7-9 (connect timeout, no reconnect attempts, warning instead of a rejection)
+  it("[7-2] cleanupOldBuildKeys gives up within 3s when Redis is unreachable", async () => {
     const { cleanupOldBuildKeys } = await freshInstrumentation();
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const result = await within(
       cleanupOldBuildKeys({ redisUrl: `redis://127.0.0.1:${await deadPort()}`, patterns: [{ scan: "x:*" }] }),
       3000,
     );
-    expect(result.settled).toBe(true);
+    expect(result).toEqual({ settled: true, value: { deleted: 0 } });
+    expect(warn.mock.calls.some((c) => String(c[0]).includes("[cache-cleanup] Gave up"))).toBe(true);
+    expect(created.every((c) => !c.isOpen), "the cleanup client is closed").toBe(true);
   });
 });
 

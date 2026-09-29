@@ -8,6 +8,7 @@
 import { promises as fs } from "fs";
 import path from "path";
 import { createClient } from "@redis/client";
+import { withTimeout } from "./redis-client";
 
 // ------------------------------------------------------------------
 // Types
@@ -32,7 +33,16 @@ export interface CleanupOptions {
   redisUrl: string;
   /** Patterns defining which keys to scan and which to keep */
   patterns: CleanupPattern[];
+  /**
+   * Give up when Redis is not reachable within this time, and when a single SCAN/UNLINK takes
+   * longer (ms, default 5000). The cleanup then logs a warning and resolves instead of hanging.
+   */
+  timeoutMs?: number;
 }
+
+/** Keys per UNLINK command: bounded work per round trip instead of one huge DEL (7-9). */
+const UNLINK_BATCH_SIZE = 500;
+const SCAN_COUNT = 200;
 
 interface PrerenderManifest {
   version: number;
@@ -221,6 +231,14 @@ export async function registerInitialCache(
 /**
  * Cleanup Redis keys from old builds.
  *
+ * Keys are found with SCAN (COUNT 200) and removed with UNLINK in batches of at most
+ * 500 while scanning, so memory stays bounded and no single command blocks Redis for long.
+ * Keys matched by several patterns are deleted and counted once (`deleted` is what Redis removed).
+ *
+ * The cleanup never hangs startup and never rejects because of Redis: an unreachable Redis (connect
+ * timeout, no reconnect attempts) or a failing command is logged with console.warn and the promise
+ * resolves with the keys deleted so far.
+ *
  * Usage in consumer's instrumentation.ts:
  * ```ts
  * const { cleanupOldBuildKeys } = await import("@mirunamu/next-redis-cache/instrumentation");
@@ -236,38 +254,57 @@ export async function registerInitialCache(
 export async function cleanupOldBuildKeys(
   options: CleanupOptions
 ): Promise<{ deleted: number }> {
-  const { redisUrl, patterns } = options;
-  const client = createClient({ url: redisUrl });
-  client.on("error", (err) =>
-    console.error("[cache-cleanup:redis]", err.message)
+  const { redisUrl, patterns, timeoutMs = 5000 } = options;
+  const client = createClient({
+    url: redisUrl,
+    socket: { connectTimeout: timeoutMs, reconnectStrategy: false },
+  });
+  client.on("error", (err: Error) =>
+    console.warn("[cache-cleanup:redis]", err.message)
   );
-  await client.connect();
+
+  let deleted = 0;
+  let batch = new Set<string>();
+  const flush = async () => {
+    if (batch.size === 0) return;
+    const keys = [...batch];
+    batch = new Set();
+    deleted += Number(await withTimeout(client.unlink(keys), timeoutMs));
+  };
 
   try {
-    const allOldKeys: string[] = [];
+    await withTimeout(client.connect(), timeoutMs);
 
     for (const { scan, keepExact, keepPrefix } of patterns) {
-      for await (const keys of client.scanIterator({
-        MATCH: scan,
-        COUNT: 200,
-      })) {
-        for (const key of keys) {
+      let cursor = "0";
+      do {
+        const reply = await withTimeout(
+          client.scan(cursor, { MATCH: scan, COUNT: SCAN_COUNT }),
+          timeoutMs
+        );
+        cursor = String(reply.cursor);
+        for (const key of reply.keys) {
           const k = String(key);
           if (keepExact && k === keepExact) continue;
           if (keepPrefix && k.startsWith(keepPrefix)) continue;
-          allOldKeys.push(k);
+          batch.add(k);
+          if (batch.size >= UNLINK_BATCH_SIZE) await flush();
         }
-      }
+      } while (cursor !== "0");
     }
+    await flush();
 
-    if (allOldKeys.length > 0) {
-      console.log(`[cache-cleanup] Deleting ${allOldKeys.length} old keys`);
-      await client.del(allOldKeys);
-    }
-
-    console.log(`[cache-cleanup] Done.`);
-    return { deleted: allOldKeys.length };
+    console.log(`[cache-cleanup] Done. Deleted ${deleted} old keys.`);
+  } catch (err) {
+    console.warn(
+      `[cache-cleanup] Gave up after deleting ${deleted} keys: ${err instanceof Error ? err.message : String(err)}`
+    );
   } finally {
-    await client.disconnect();
+    try {
+      client.destroy();
+    } catch {
+      // never connected
+    }
   }
+  return { deleted };
 }

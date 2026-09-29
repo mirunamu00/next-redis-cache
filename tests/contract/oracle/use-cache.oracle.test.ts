@@ -143,6 +143,10 @@ describe("use-cache handler vs Next's default handler", () => {
     expect(seen.miss).toBeGreaterThan(10);
   });
 
+  // 1.1.0 records `now` for durations (no more future timestamps), but two differences remain until the
+  // 2.0 tag state (P2): Next serves an older entry stale once (revalidate -1) where 1.x misses, and Next's
+  // default getExpiration returns the future `expired` time for such tags, so it discards soft-tagged
+  // entries written after the update where 1.x hits.
   itRepro("7-1", "agrees when tags are revalidated with durations (revalidateTag(tag, profile))", async () => {
     await fc.assert(
       fc.asyncProperty(program(true), async (ops) => {

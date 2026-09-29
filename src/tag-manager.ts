@@ -9,6 +9,13 @@ import type { RedisClientType } from "@redis/client";
 import { assertClientReady, runCommand } from "./redis-client";
 import { isImplicitTag, type ResolvedRedisOptions } from "./types";
 
+/**
+ * 1.0.x recorded `now + expire` for updateTags(tags, durations) (issue 7-1), which kept every entry
+ * of the tag a miss until that future time (a year for revalidateTag(tag, "max")). A revalidation
+ * time further ahead than this tolerance (clock skew between instances) can only be such a value.
+ */
+const FUTURE_TOLERANCE_MS = 60_000;
+
 export class TagManager {
   private client: RedisClientType;
   private keyPrefix: string;
@@ -64,18 +71,35 @@ export class TagManager {
    */
   async isStale(tags: string[], lastModified: number): Promise<boolean> {
     if (tags.length === 0) return false;
+    const times = await this.revalidationTimes(tags);
+    return times.some((t) => t > lastModified);
+  }
 
-    const times = await this.exec(
+  /**
+   * Revalidation times (ms, 0 = never) of `tags`. A future time left by 1.0.x is healed: it is
+   * treated as "revalidated now" and rewritten as such, so the tag works normally again after one
+   * regeneration instead of missing until that future time. (A concurrent updateTags between the
+   * read and the rewrite can be moved back by the few milliseconds in between.)
+   */
+  private async revalidationTimes(tags: string[]): Promise<number[]> {
+    const raw = await this.exec(
       () => this.client.hmGet(this.revalidatedTagsKey, tags)
     );
-
-    for (const t of times) {
-      if (t && parseInt(t, 10) > lastModified) {
-        return true;
+    const now = Date.now();
+    const healed: Record<string, string> = {};
+    const times = raw.map((value, i) => {
+      const t = value ? parseInt(value, 10) : 0;
+      if (!Number.isFinite(t)) return 0;
+      if (t > now + FUTURE_TOLERANCE_MS) {
+        healed[tags[i]!] = now.toString();
+        return now;
       }
+      return t;
+    });
+    if (Object.keys(healed).length > 0) {
+      await this.exec(() => this.client.hSet(this.revalidatedTagsKey, healed));
     }
-
-    return false;
+    return times;
   }
 
   /**
@@ -163,40 +187,30 @@ export class TagManager {
    */
   async getTagExpiration(tags: string[]): Promise<number> {
     if (tags.length === 0) return 0;
-
-    const times = await this.exec(
-      () => this.client.hmGet(this.revalidatedTagsKey, tags)
-    );
-
-    let max = 0;
-    for (const t of times) {
-      if (t) {
-        const ts = parseInt(t, 10);
-        if (ts > max) max = ts;
-      }
-    }
-
-    return max;
+    const times = await this.revalidationTimes(tags);
+    return Math.max(0, ...times);
   }
 
   /**
    * Update tag timestamps for revalidation (use-cache handler).
+   *
+   * Next's default handler records `{ stale: now, expired: now + expire }` when durations are given
+   * (revalidateTag(tag, profile)): entries are served stale once while they regenerate. 1.x stores a
+   * single time per tag, so both cases record `now`: the next read of an older entry is a miss that
+   * regenerates it (like updateTag). Serving the stale entry meanwhile needs the 2.0 tag state.
+   * Never a future time - that disabled the cache for the tag until then (7-1).
    */
   async updateTagTimestamps(
     tags: string[],
-    durations?: { expire?: number }
+    _durations?: { expire?: number }
   ): Promise<void> {
     assertClientReady(this.client);
 
-    const now = Date.now();
+    const now = Date.now().toString();
 
     const entries: Record<string, string> = {};
     for (const tag of tags) {
-      if (durations?.expire !== undefined) {
-        entries[tag] = (now + durations.expire * 1000).toString();
-      } else {
-        entries[tag] = now.toString();
-      }
+      entries[tag] = now;
     }
 
     if (Object.keys(entries).length > 0) {

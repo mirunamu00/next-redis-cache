@@ -1,4 +1,4 @@
-// Known-bug reproductions on full-legacy (ROADMAP.md 7-1, 7-6). Expected failures on 1.0.6.
+// Known-bug reproductions on full-legacy (ROADMAP.md 7-6). Expected failures on 1.x until P2.
 import { expect, getPage, repro, test } from "../fixtures";
 import { waitFor } from "../../support/wait-for";
 
@@ -35,8 +35,9 @@ test.describe("full-legacy reproductions", () => {
     expect(statuses.filter((s) => s !== 200)).toEqual([]);
   });
 
-  test("[7-1] revalidateTag(tag, 'max') on a pinned page serves stale, then the new data (never 404)", async ({ fleet }) => {
-    repro("7-1", "1.x ignores the profile and deletes tagged entries, so the dynamicParams=false page 404s");
+  test("[7-6] revalidateTag(tag, 'max') on a pinned page serves stale, then the new data (never 404)", async ({ fleet }) => {
+    // Was filed under 7-1; since 1.1.0 records no future time the remaining cause is 7-6 (P2).
+    repro("7-6", "1.x ignores the profile and deletes tagged entries, so the dynamicParams=false page 404s");
     expect((await getPage(fleet, "/pinned/5")).status).toBe(200);
     fleet.origin!.bump("pinned-5");
     await invalidate(fleet, "tag=pinned-5&profile=max");

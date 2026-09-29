@@ -1,6 +1,6 @@
 // Reproductions against real Redis (ROADMAP.md 7-1, 7-4, 7-5, 7-6, 7-9, 7-11, 7-12), once per Redis
-// version under test. Each asserts the correct behavior and is an expected failure on 1.0.6
-// (tests/support/repro.ts). Tests that pin behavior 1.0.6 already gets right use plain `it`.
+// version under test. Each asserts the correct behavior. `itRepro` marks the ones still expected to
+// fail (tests/support/repro.ts); plain `it` is used for fixed bugs and for behavior 1.0.6 got right.
 import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -50,7 +50,7 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       expect(await uc.get("k", [])).toBeUndefined();
     });
 
-    itRepro("7-1", "an entry written after updateTags(tags, { expire: 1y }) is readable", async () => {
+    it("[7-1] an entry written after updateTags(tags, { expire: 1y }) is readable", async () => {
       const uc = createUseCacheHandler(options(uniqueNamespace()));
       await uc.updateTags(["t"], { expire: YEAR });
       await new Promise((r) => setTimeout(r, 5));
@@ -58,13 +58,13 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       expect(await readEntry(await uc.get("k", []))).toBe("fresh");
     });
 
-    itRepro("7-1", "getExpiration after updateTags(tags, { expire }) never reports a future time", async () => {
+    it("[7-1] getExpiration after updateTags(tags, { expire }) never reports a future time", async () => {
       const uc = createUseCacheHandler(options(uniqueNamespace()));
       await uc.updateTags(["t"], { expire: YEAR });
       expect(await uc.getExpiration(["t"])).toBeLessThanOrEqual(Date.now());
     });
 
-    itRepro("7-1", "a legacy entry written after a use-cache updateTags(tags, { expire }) is readable (shared hash)", async () => {
+    it("[7-1] a legacy entry written after a use-cache updateTags(tags, { expire }) is readable (shared hash)", async () => {
       const ns = uniqueNamespace();
       const uc = createUseCacheHandler(options(ns));
       const { handler } = await freshLegacy(options(ns));
@@ -74,7 +74,7 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       expect(await handler.get("/page", { softTags: [] })).not.toBeNull();
     });
 
-    itRepro("7-1", "a future tag timestamp left by 1.0.x heals: an entry written after the next read is a hit", async () => {
+    it("[7-1] a future tag timestamp left by 1.0.x heals: an entry written after the next read is a hit", async () => {
       const ns = uniqueNamespace();
       const uc = createUseCacheHandler(options(ns));
       await client.hSet(`${ns}:_revalidated`, "t", String(Date.now() + YEAR * 1000));

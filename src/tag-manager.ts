@@ -204,6 +204,7 @@ export class TagManager {
     tags: string[],
     _durations?: { expire?: number }
   ): Promise<void> {
+    if (tags.length === 0) return;
     assertClientReady(this.client);
 
     const now = Date.now().toString();

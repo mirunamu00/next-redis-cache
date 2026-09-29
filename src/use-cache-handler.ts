@@ -159,6 +159,8 @@ export function createUseCacheHandler(
       });
       pendingSets.set(cacheKey, pendingPromise);
 
+      // Only a failed Redis write is reported; a rejected pending entry is a failed render
+      let writing = false;
       try {
         const entry = await pendingEntry;
 
@@ -188,13 +190,14 @@ export function createUseCacheHandler(
           Math.floor(entry.expire - (Date.now() - entry.timestamp) / 1000)
         );
 
+        writing = true;
         await exec(() => client.set(fullKey, serialized, { EX: ttlSeconds }));
 
         reporter.success();
         log("set", cacheKey, `done (${buffer.byteLength} bytes)`);
       } catch (err) {
         log("set", cacheKey, `error: ${err}`);
-        reporter.failure("set", cacheKey, err);
+        if (writing) reporter.failure("set", cacheKey, err);
       } finally {
         resolvePending();
         pendingSets.delete(cacheKey);
@@ -210,7 +213,7 @@ export function createUseCacheHandler(
     async getExpiration(tags: string[]): Promise<number> {
       try {
         const expiration = await tagManager.getTagExpiration(tags);
-        reporter.success();
+        if (tags.length > 0) reporter.success(); // no tags = no Redis round trip
         return expiration;
       } catch (err) {
         log("getExpiration", "-", `error: ${err}`);
@@ -225,7 +228,7 @@ export function createUseCacheHandler(
     ): Promise<void> {
       try {
         await tagManager.updateTagTimestamps(tags, durations);
-        reporter.success();
+        if (tags.length > 0) reporter.success(); // no tags = no Redis round trip
         log("updateTags", tags.join(","), "done");
       } catch (err) {
         log("updateTags", tags.join(","), `error: ${err}`);

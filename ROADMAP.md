@@ -59,6 +59,15 @@ npm 게시물에는 포함되지 않는다(`package.json`의 `files`는 `dist`�
 | 7-12 | 낮음 | set 3명령 비원자·NX 스킵이어도 Hash 덮어씀. 다른 Pod에서 값 기록과 HSET 사이의 get이 방금 쓴 값을 고아로 삭제 가능. 같은 키 set 중첩 시 앞 set의 finally가 뒤 set의 pending을 지움 | `legacy-handler.ts:335-342`, `use-cache-handler.ts:196-197` |
 | 7-13 | 낮음 | README 불일치: in-flight 중복 제거 과장, 전 호출 타임아웃 주장, 기본 `uc:` 프리픽스가 keyPrefix 밖, `cacheLife("hours")` 값 오기, App Route 프리워밍 미동작, `LICENSE` 파일 부재, 보안(Redis 쓰기 권한 = 캐시 오염 권한) 언급 없음, Action이 태그 고정 | README 각처 |
 
+### 2.1 P0c~P0d에서 새로 확인한 사실
+
+- **빈 Redis에서 prerender 경로 404(A2)**: 1.0.6 + Redis 연결 정상 + 키 없음 → `dynamicParams=false` 페이지가 404(Next가 null을 받으면 NoFallbackError). docs의 프리워밍 의존·운영 사고와 같은 경로다. 프리워밍을 켜도 `dynamicParams=false` 페이지는 무효화 뒤(7-6)·키 유실 뒤(C6)·롤링 중 정리 뒤(C11·C12)에 그대로 404다.
+- **세그먼트 prefetch 미스는 16.3.6에서 404**(1절·7-4의 "204"는 이전 버전 관찰). 프리워밍 키 형식이 틀리면 404, Next가 직접 렌더해 저장한 항목은 200.
+- **프리워밍이 `/_`로 시작하는 라우트를 통째로 건너뛴다**(`/_not-found`) — 7-4의 "not-found status 유실"은 실제로는 "아예 프리워밍 안 됨"이다.
+- **7-3은 기본 재연결 클라이언트에서도 터진다**: 트래픽 중 Redis가 3초 끊기면 unhandledRejection 165~171건. 핸들러가 명령을 먼저 보내고 ready 검사에서 버린 promise 중 일부가 재연결 실패 때 거절되는 것으로 추정한다(나머지는 offline queue에 남았다가 복구 후 재전송, 3~22건 관측).
+- **레거시 클래스 타입 비호환**: `LegacyCacheHandler`는 Next `CacheHandlerContext`로 생성되는 클래스 타입에 대입되지 않는다(자체 context 타입의 index signature). 7-8에 포함, contract-types가 `@ts-expect-error`로 추적.
+- `@redis/client` **6.2.1이 출시**됐다. peer `>=5.0.0`은 검증되지 않은 6.x를 허용한다(9절 리스크).
+
 ---
 
 ## 3. 목표와 수용 기준
@@ -192,28 +201,34 @@ next-redis-cache/
 ├─ package.json              # 배포 패키지. files:["dist"], workspaces 없음
 ├─ tsconfig.json             # 에디터·typecheck(전체) / tsconfig.build.json(src만) / tests는 tsconfig.json이 포함
 ├─ tsup.config.ts  eslint.config.mjs  vitest.config.ts  playwright.config.ts(P0c)
-├─ stryker.config.mjs(P0e)  .size-limit.json  .gitattributes  .nvmrc  LICENSE  ROADMAP.md
+├─ stryker.config.mjs  vitest.mutation.config.ts(P0e)  .size-limit.json  .gitattributes  .nvmrc  LICENSE  ROADMAP.md
 ├─ src/
 ├─ tests/
-│  ├─ support/               # redis 팩토리, 네임스페이스·DB 할당, waitFor, toxiproxy 클라이언트, mini-redis
+│  ├─ support/               # redis 팩토리, 네임스페이스·DB 할당, waitFor, toxiproxy 클라이언트, mini-redis,
+│  │                         # handlers(핸들러 직접 구동), repro(재현 규약), quarantine(P0d~)
 │  ├─ unit/  property/  integration/  fault/
 │  ├─ contract/{types,oracle}/
-│  ├─ e2e/{static-site,full-legacy,full-cc}/
-│  ├─ chaos/  perf/{scenarios,baseline}/
+│  ├─ e2e/{static-site,full-legacy,full-cc}/ + fixtures.ts
+│  ├─ chaos/ (harness.ts + 시나리오)  perf/baseline/
+│  └─ fixtures/next-build/   # 7-4 프리워밍 재현용 Next 16.3.6 빌드 산출물 일부
 ├─ test-apps/
 │  ├─ static-site/  full-legacy/  full-cc/  _shared/
 │  └─ _variants/{next-16.1,next-16.3,canary}/   # 버전별 package.json(+lock)
 ├─ scripts/                  # 전부 Node .mjs
 │  ├─ check-pack.mjs  check-no-hangul.mjs  quality.mjs  coverage-summary.mjs  (P0a)
 │  ├─ infra.mjs  test-all.mjs  (P0b)
-│  ├─ lib/{run,pack-rules,hangul-rules}.mjs
-│  ├─ pack.mjs  prepare-app.mjs  origin-server.mjs  fleet.mjs  ci-matrix.mjs   (P0c~)
+│  ├─ lib/{run,pack-rules,hangul-rules,work}.mjs
+│  ├─ pack.mjs  prepare-app.mjs  origin-server.mjs  fleet.mjs  contract-types.mjs   (P0c)
+│  ├─ perf.mjs   (P0d)
+│  └─ check-quarantine.mjs  junit-summary.mjs  mutation-summary.mjs  nightly-issue.mjs   (P0e)
 ├─ docker/
 │  ├─ compose.yml            # 프로필: redis84, redis72, prodlike, toxiproxy, replica
 │  ├─ redis/prodlike.conf
 │  └─ toxiproxy/proxies.json
-└─ .github/workflows/{ci.yml, nightly.yml(P0e), release.yml}
+└─ .github/workflows/{ci.yml, chaos.yml(재사용), nightly.yml, release.yml}
 ```
+
+- 계획 대비: `ci-matrix.mjs`는 만들지 않았다 — 매트릭스는 `fromJSON(inputs.level == 'full' && ... || ...)` 식으로 ci.yml 안에서 계산한다. `tests/perf/scenarios/`는 시나리오가 2개뿐이라 `scripts/perf.mjs` 안에 둔다.
 
 - npm workspaces 미사용(앱별 Next 버전 충돌, 심링크 문제). 테스트 앱은 독립 npm 프로젝트, 루트 스크립트가 조립.
 - 게시물 격리: `files:["dist"]` + `check-pack.mjs`가 `npm pack --dry-run --json` 목록을 `dist/**`, `README.md`, `LICENSE`, `package.json` 화이트리스트와 대조(PR 게이트). exports·main·module·types가 가리키는 파일 누락도 실패.
@@ -226,6 +241,13 @@ next-redis-cache/
 - 로컬 빠른 반복 `--hot-dist`: 새 `dist`를 `.work/<app>/node_modules/.../dist`에 **복사**(CI는 항상 tarball).
 - 기준선 모드 `--pkg npm:1.0.6`: 같은 시나리오를 게시본으로 실행(P0d 재현·기준선).
 - Next 매트릭스: `_variants/next-16.1`·`next-16.3`에 lock 커밋, 앱 소스는 공유하고 `prepare-app`이 `.work/<app>@<variant>/`로 **복사** 조립(Windows 심링크 권한 회피). canary는 lock 없이 nightly·실패 허용. Dependabot이 변형 lock 갱신.
+- **P0c 구현 세부(확정)**
+  - 변형 고정값(2026-09-29 최신 패치): `next-16.1` = next 16.1.7 + react/react-dom 19.2.8, `next-16.3` = next 16.3.6 + react 19.3.0, 공통 `@redis/client` 5.12.1. canary = `next@canary` + `react@latest`, lock 없음.
+  - `pack.mjs`: 작업 트리 → `.artifacts/nrc-local.tgz`(`--no-build`면 기존 dist), `npm:<버전>` → `.artifacts/nrc-npm-<버전>.tgz`(한 번 받으면 재사용).
+  - `prepare-app.mjs <app|all> --variant --pkg local|npm:1.0.6|x.tgz --build A[,B] --api v1 --hot-dist --no-pack`: 변형 lock 해시가 같으면 `npm ci` 생략, tarball 해시가 같으면 재설치 생략, tarball은 상대경로로 `npm install --no-save`. `npm ls next @redis/client --all`로 각 1버전만 있는지 검사(없거나 2개 이상이면 실패). 빌드는 `.next/standalone`을 `builds/<id>/`로 옮기고 `.next/static`·`public`·`_shared`를 복사, `nrc-build.json`(app·variant·buildId·api·next·패키지 버전) 기록.
+  - 빌드는 `next build`를 **비동기 spawn**한다 — origin server가 같은 프로세스에 있어 `spawnSync`면 빌드 중 fetch가 멈춘다(실제로 use-cache 채움 타임아웃으로 빌드가 실패했다).
+  - next.config는 `outputFileTracingRoot`·`turbopack.root`를 앱 디렉토리로 고정한다(레포 루트의 package-lock.json을 워크스페이스 루트로 오인하지 않게). standalone의 `cacheHandler` 경로는 Next가 distDir 기준 상대경로로 기록하므로 `builds/<id>/`로 옮겨도 동작한다.
+  - Windows: 빌드 직후 새 파일(static-site 약 3,300개)을 처음 열 때 Defender 검사로 193초가 걸려 첫 기동이 fleet 준비 타임아웃(120초)을 넘겼다. `prepare-app`이 빌드 직후 모든 파일을 한 번 읽어 그 비용을 흡수한다(`.work/`를 Defender 예외로 두면 즉시). Linux CI는 해당 없음.
 
 ### 6.3 테스트 앱
 
@@ -237,6 +259,17 @@ next-redis-cache/
 - **full-legacy**(cacheComponents off): `/isr/[id]` revalidate=2, `/pinned/[id]` dynamicParams=false+태그 fetch, `/fetch-tags`, 라우트 핸들러(force-static, revalidate=5), 서버 액션(`revalidateTag` 무/‘max’/{expire}, `revalidatePath`), `/race/[k]`(origin 지연 중 무효화).
 - **full-cc**(cacheComponents on): `"use cache"`+`cacheTag`+`cacheLife('hours')`, 커스텀 `short`{revalidate:2,expire:10}, `"use cache: remote"`, PPR 페이지(`postponed` 보존), `updateTag` 액션, 세그먼트 prefetch 대상.
 - 앱을 나누는 이유: Next 16에서 cacheComponents와 `export const revalidate/dynamic` 동시 사용 불가로 알고 있음 — **P0c 첫 빌드에서 확인**.
+- **P0c 확인 결과·구현 세부(확정)**
+  - **cacheComponents 제약 확인**: full-cc(16.3.6) 페이지에 `export const revalidate = 60` → `Route segment config "revalidate" is not compatible with nextConfig.cacheComponents. Please remove it.`, `export const dynamic = "force-dynamic"` → 같은 오류(`"dynamic"`)로 빌드 실패. 앱 분리 유지.
+  - 앱은 **JS(.jsx/.mjs)** 로 작성했다(계획은 TS). 변형에 typescript를 넣지 않아 설치·빌드가 가볍고, 타입 검증은 contract-types가 맡는다.
+  - 테스트 훅 경로는 `/api/nrc-test/stats`·`/api/nrc-test/unhandled`다 — `__test`처럼 `_`로 시작하는 폴더는 App Router의 private folder라 라우트가 되지 않는다.
+  - `NRC_API=v1` 어댑터(`_shared/cache-handler.mjs`·`use-cache-handler.mjs`)는 **README Quick Start 배선을 그대로** 쓴다(onCreation 안에서 `await client.connect()`, use-cache는 top-level await). 재현 테스트가 실제 사용자가 겪는 것을 보려면 문서 배선이어야 한다. 카운터는 서브클래스·래퍼로만 붙인다. `NRC_API=v2`는 P2에서 채운다(지금은 명시적 오류).
+  - instrumentation 플래그: `NRC_PREWARM=1`(README Step 4의 `registerInitialCache`, await), `NRC_CLEANUP=1`(`cleanupOldBuildKeys` keepPrefix=자기 빌드, await). e2e 기본값은 static-site·full-legacy에 prewarm on — 1.0.6은 빈 Redis에서 `dynamicParams=false` 페이지가 404라서다(이 자체가 A2 재현).
+  - 마커: TEST_HOOKS=1일 때 `<div id="nrc-test" data-build data-render-id data-rendered-at data-instance>`. full-cc는 cacheComponents에서 `Date.now()`·`randomUUID()`를 캐시 스코프 밖에서 못 쓰므로 마커를 `"use cache"` 컴포넌트 안에 넣는다(= 캐시 항목 생성 시점).
+  - static-site 본문은 페이지당 텍스트 100~250KB(HTML은 RSC 인라인 때문에 약 2배 → 200~500KB). 처음엔 텍스트 200~500KB로 만들었더니 HTML이 최대 1MB, 1벌이 Redis 약 200MB라 로컬 반복이 무거웠다.
+  - full-cc: 수명이 짧은 캐시(`short`, expire 10s < 5분)와 `"use cache: remote"`는 정적 셸에서 빠지므로 `<Suspense>` 안에 둔다. PPR 셸의 캐시 컴포넌트는 origin fetch를 하지 않는다(동적 구멍에서 프리렌더가 중단될 때 진행 중 fetch가 "Filling a cache during prerender timed out"으로 보고됨). `/dyn/[id]`(요청마다 use-cache 조회)는 chaos·perf용으로 추가.
+  - full-legacy `/pinned/[id]`는 테스트 간 격리를 위해 id 1~6.
+  - 서버 액션은 브라우저 없이 JS 없는 폼 제출(숨은 `$ACTION_ID_*` 필드를 multipart로 POST)로 호출한다 → e2e에 Playwright 브라우저가 필요 없다(CI에서 chromium 설치 생략).
 
 ### 6.4 인프라
 
@@ -255,6 +288,7 @@ next-redis-cache/
   - testcontainers는 `~12.0.4` 고정 — 12.1+는 `engines.node >=22.22`라 로컬 Node 22.21에서 경고. 로컬 Node를 22.22+로 올리면 해제 가능.
   - mini-redis TS 포팅은 원본 대비 값 바이너리 안전(Buffer 저장), `AUTH`(password 옵션)·`PTTL`·`SET PX`·`DBSIZE`·`HGETALL`·`FLUSHDB` 추가, `connectionCount()`·`getBuffer()` 추가.
 - **멀티 인스턴스·롤링**(`scripts/fleet.mjs`, P0c): BUILD_ID A/B 산출물 2벌, 인스턴스 2~3개(get-port, `INSTANCE_ID`, toxiproxy 경유 공유 Redis), 내장 라운드로빈 LB, 롤링 A→B(`maxSurge 1, maxUnavailable 0` 재현)와 롤백 B→A, 종료는 tree-kill.
+  - 구현(계획 대비): get-port·tree-kill 의존성 없이 포트는 `listen(0)`으로 받고, `node server.js`를 셸 없이 직접 spawn하므로 자식 프로세스만 종료하면 된다(SIGTERM 5초 후 SIGKILL). 준비 판정은 `/api/nrc-test/stats` 200(기본 120초). LB는 응답에 `x-nrc-upstream`을 붙인다. 스스로 종료한 인스턴스는 `fleet.crashed`(I2). `stop()`은 네임스페이스 키를 SCAN+UNLINK로 지운다(`NRC_KEEP_KEYS=1`이면 남김) — 안 지우면 e2e 몇 번에 로컬 Redis가 1.5GB까지 찼다. 인스턴스 로그는 `.work/logs/<app>@<variant>/<ns>/<id>.log`.
 - **Windows**: 스크립트 전부 Node, `.gitattributes` eol=lf, 짧은 `.work` 경로, testcontainers는 Docker Desktop npipe. **GitHub windows 러너는 Linux 컨테이너 불가** → Windows CI는 docker 불필요 계층만.
 
 ### 6.5 테스트 계층
@@ -278,6 +312,19 @@ next-redis-cache/
 
 **perf 게이트**: 결정론 지표(요청당 왕복 수 = `INFO commandstats` 차분, 레거시 히트 ≤2·use-cache 히트 ≤2 / 빌드 1벌 `MEMORY USAGE` 합 기준선 +5% 이내)는 PR 하드 게이트. 시간 지표(p50/p99)는 nightly 3회 중앙값, 기준선 +20% 초과 시 경고만.
 
+**P0c~P0d 구현 세부(확정)**
+
+- **재현(기대 실패) 규약** — 재현 테스트는 *올바른 동작*을 단언하고 기대 실패로 등록한다. 수정되면 테스트가 통과 → 러너가 "기대 실패인데 통과"로 실패 → 수정 커밋이 표식을 지워야만 green.
+  - vitest: `itRepro("7-x", "...", fn)`(`tests/support/repro.ts`, 내부는 `it.fails`) → 수정 시 `it("[7-x] ...")`로 교체.
+  - Playwright: 테스트 첫 줄 `repro("7-x", "원인")`(`test.fail`) → 수정 시 삭제.
+  - tsc(contract-types): `// @ts-expect-error [7-x] ...` → 수정 시 "Unused @ts-expect-error"로 실패하므로 삭제.
+  - `NRC_REPRO=show`면 셋 다 일반 테스트로 돌아 실제 실패 메시지를 출력한다(재현 증거). 남은 재현은 `grep -rn "\[7-" tests`로 본다.
+  - 제목에 ID를 넣는다: `[7-x]`(2절 문제) 또는 `[A2]`(수용 기준 — 버그 번호가 없는 것).
+- **contract-types**: `scripts/contract-types.mjs --variant next-16.1|next-16.3|canary|all --pkg`가 `.work/contract@<variant>/`에 변형 의존성+tarball을 설치하고 `tests/contract/types/*.contract.mts`(NodeNext, ESM 소비자 관점)를 레포의 tsc로 컴파일한다. 루트 typecheck에서는 제외.
+- **contract-oracle**: `tests/contract/oracle/use-cache.oracle.test.ts`. fast-check 프로그램(set/get/updateTags/시간 경과)을 Next `createDefaultCacheHandler`와 우리 핸들러(mini-redis)에 적용하고, Next use-cache wrapper가 get 결과로 내릴 판정(`miss`/`hit`/`stale`, `getExpiration` 결과 ≥ timestamp면 폐기)을 비교한다. 시간은 `Date.now`·`performance.now`를 가상 시계로 바꿔 두 핸들러와 mini-redis 만료가 같은 시계를 본다. 비교 대상은 루트 devDependency의 Next(현재 16.1.6). docker 불필요라 `npm test`에 포함(vitest project `contract`).
+- **chaos 구현 범위(P0d)**: 6.9 매핑의 C1·C9·C2·C5·C6·C13·C11·C12(`tests/chaos/*.test.ts`, vitest project `chaos`, 파일 순차). 전제: `infra:up -- redis84 toxiproxy`, static-site A·B / full-legacy A / full-cc A 빌드. C3·C4·C7·C8·C10·C14는 해당 기능 단계(P3·P4·P6)에서 추가.
+- **perf 지표 정의(계획 대비)**: "왕복 수" 대신 **요청당 Redis 명령 수**를 잰다. `INFO commandstats`는 서버 전역이라 다른 트래픽이 섞이므로, 별도 연결의 `MONITOR`로 이번 네임스페이스 키를 건드린 명령만 센다. 키 모양으로 핸들러를 가른다(`uc:` = use-cache, `_tags`·`_tagTtls`·`_revalidated` = 태그 상태, 나머지 = 레거시). use-cache 시나리오는 `/dyn/1`(PPR 셸은 레거시, 동적 부분이 use-cache)이라 두 핸들러 합계다. 게이트: 명령 수는 기준선 초과 금지, 메모리는 같은 Redis 마이너일 때 +5% 이내. 시간 지표는 `--time`(autocannon 10초, 8연결).
+
 ### 6.6 품질 게이트와 결정론
 
 - 커버리지(v8, unit+property+integration+fault 병합, `src/**`): lines 90 / branches 85 / functions 90, 파일별 lines ≥80 — **2.0.0 전까지 리포트만, 2.0.0부터 차단**.
@@ -285,7 +332,10 @@ next-redis-cache/
   - P0a 실제값: attw는 P1(조건별 types 교정) 전까지 `false-esm` 규칙만 무시. size-limit은 `@size-limit/file`로 엔트리 파일+공유 청크의 gzip 크기를 잰다(dist가 minify되지 않으므로 "min+gz"가 아니라 배포물 그대로의 gz). 1.0.6 기준 `.` 4.12kB→예산 5kB, `./use-cache` 3.14kB→3.8kB, `./instrumentation` 1.69kB→2.1kB, CJS 합계 7.5kB→9kB. 별도 `size.mjs` 없이 `.size-limit.json`만 둔다.
   - 커버리지는 P0a/P0b 시점 CI에서 unit+property만 수집. integration·fault 병합은 P0e(리포팅)에서.
 - flaky: 재시도 금지(`retry:0`, Playwright `retries:0`). 불안정 테스트는 `@quarantine` 태그로 게이트 제외 + 추적 이슈 + 7일 내 수정/삭제, nightly `--repeat-each=20`.
+  - 구현(P0e): vitest는 `itQuarantine("#<이슈> until YYYY-MM-DD", name, fn)`(`tests/support/quarantine.ts`) — 평소 skip, `NRC_QUARANTINE=only`면 그것만 `repeats: 20`. Playwright는 제목에 `@quarantine(#<이슈> until YYYY-MM-DD)`, config가 평소 `grepInvert`, `NRC_QUARANTINE=only`면 `grep`. `scripts/check-quarantine.mjs`(CI static)가 이슈 번호·기한 형식, 기한 경과, 7일 초과를 실패시킨다(음성 시험: 지난 기한·형식 위반 주입 시 exit 1 확인). nightly `quarantine` job이 x20 반복.
 - 리포팅: vitest JUnit·JSON·coverage(lcov/html), Playwright html+trace+JUnit, perf JSON → artifact, 요약은 `$GITHUB_STEP_SUMMARY`. 외부 서비스 없음.
+  - 구현(P0e): `scripts/junit-summary.mjs`가 JUnit(vitest `reports/junit.xml`, Playwright `reports/e2e-junit.xml`)을 표로 요약. 커버리지는 unit(Node 22)·integration(7.2/8.4)·fault job이 `NRC_BLOB=<이름>`으로 blob 리포트(커버리지 포함)를 남기고, ci `coverage` job이 `vitest --merge-reports`로 합쳐 `coverage-summary.mjs`로 요약(리포트 전용, gate 밖). perf는 `reports/perf.json`+요약, mutation은 `scripts/mutation-summary.mjs`.
+  - mutation(계획 대비): `@stryker-mutator/vitest-runner` 10.0.0은 vitest 5와 dry run은 되지만 변이마다 실행 테스트 0건으로 보고해 전부 "survived"가 된다. **command runner**로 docker 불필요 계층(`vitest.mutation.config.ts`: unit·property·contract·fault/mini-redis)을 변이마다 통째로 돌린다(`--bail 1`). 671개 변이, 로컬 약 15분(동시성 4).
 - 결정론: 패키지 시간 읽기는 내부 `clock.now()`로 모음(unit/property는 가짜 시계). 실제 시간이 필요한 곳은 sleep 대신 마감 있는 `waitFor` 폴링, TTL은 `PTTL` 범위 단언. 테스트마다 고유 네임스페이스 `t_<pid>_<seq>`, 전역 스캔 테스트는 워커별 논리 DB(`VITEST_POOL_ID % 16`) + 해당 DB만 FLUSHDB. 포트는 동적. 콘텐츠는 seed 생성기.
 
 ### 6.7 로컬 DX
@@ -297,10 +347,13 @@ next-redis-cache/
 | `test` | unit + property + contract-oracle (docker 불필요; oracle은 P0c~) |
 | `test:unit` / `test:prop` / `test:int` / `test:fault` / `test:contract` | 계층별. `test:fault` = fault + fault-docker, `test:fault:nodocker` = mini-redis 부분만 |
 | `check-no-hangul` / `check-pack` | 개별 게이트 |
-| `test:e2e` / `test:chaos` / `test:perf` / `test:mutation` | P0c~P0e |
+| `test:e2e` / `test:chaos` / `test:perf` / `test:mutation` | Playwright(빌드 필요) / vitest chaos(빌드+infra 필요) / `perf.mjs --check` / Stryker |
+| `test:contract` = `test:contract:oracle`(vitest contract) + `test:contract:types`(`contract-types.mjs --variant all`) | P0c~P0d |
 | `test:all` | infra:up → 전 계층 → infra:down |
 | `infra:up` / `infra:down` / `infra:logs` / `infra:ps` / `infra:cli` | compose 관리 |
-| `apps:prepare` / `fleet` | P0c |
+| `pack:local` / `apps:prepare` / `fleet` / `origin` | tarball 생성 / 앱 조립·빌드 / 수동 fleet(기본 LB 3000, origin 4010) / origin 단독 |
+
+로컬 e2e 한 바퀴: `npm run infra:up -- redis84 toxiproxy` → `node scripts/prepare-app.mjs all --build A`(패키지 1.0.6 기준선이면 `--pkg npm:1.0.6`) → `npm run test:e2e`. chaos는 여기에 `node scripts/prepare-app.mjs static-site --build A,B` 후 `npm run test:chaos`.
 | `quality` | publint + attw + size-limit + check-pack + check-no-hangul (전부 실행 후 하나라도 실패면 실패) |
 
 ### 6.8 CI
@@ -326,6 +379,15 @@ setup(매트릭스 계산, pack → tgz artifact)          [P0c~]
 - 보안: Action SHA 고정, 기본 `permissions: contents: read`, release job만 `id-token: write`·`contents`·`pull-requests: write`.
 - **trusted publishing(OIDC) 전환**: ① (사용자, npmjs.com) 패키지 Settings → Trusted Publisher → GitHub Actions, owner `mirunamu00`, repo `next-redis-cache`, workflow `release.yml`(environment 선택) ② 워크플로 Node 24 또는 npm ≥11.5.1, `id-token: write`, `NODE_AUTH_TOKEN` 제거 ③ 1.1.0 실게시로 검증 ④ (사용자) "Require 2FA and disallow tokens", `NPM_TOKEN` 시크릿·토큰 폐기. 리스크(추측): changesets/action의 `.npmrc` 처리와 `setup-node registry-url`의 빈 토큰이 OIDC와 충돌하는지 — 첫 게시는 프리릴리스로 시험.
 - 프리릴리스: `next` 브랜치에서 `changeset pre enter next` → `2.0.0-next.N`(dist-tag `next`), 안정화 전 `pre exit`.
+- **P0c~P0e 구현(확정, 계획 대비 차이 포함)**
+  - 트리거: `push`에 `feat/**` 추가(PR 없이 기능 브랜치 검증, gh CLI 없음). `pull_request`·`master`·`next`는 그대로.
+  - ci.yml job: static(+check-quarantine) · unit[22,24] · unit-windows · integration[7.2,8.4] · fault · setup(build+pack → `package-tarball` artifact) · contract[16.1,16.3(+canary, full, continue-on-error)] · e2e[app × 16.3 × 8.4 / full: app × [16.1,16.3] × [7.2,8.4]] · perf(결정론 게이트, full이면 `--time`) · coverage(병합, gate 밖) · gate.
+  - e2e 셀마다 자기 앱을 빌드한다(계획은 `app×Next` 6벌 빌드 후 Redis 셀이 artifact 재사용). 빌드가 30~40초라 수백 MB standalone(static-site 145MB)을 artifact로 옮기는 것보다 싸다.
+  - Playwright 브라우저 설치 없음(서버 액션도 폼 제출로 검증). 브라우저가 필요한 테스트가 생기면 그 job에 `npx playwright install --with-deps chromium` 추가.
+  - `chaos.yml`: 재사용 워크플로(`workflow_call`·`workflow_dispatch`, 입력 `files`·`variant`). 앱 빌드(static-site A·B, full-legacy A, full-cc A) 후 `vitest --project chaos`.
+  - `nightly.yml`: 매일 03:17 KST — ci level=full + chaos 전체 + quarantine x20 + e2e Node 24(3앱). 매주 월 04:41 KST — + mutation + canary e2e(단일 job, 테스트 단계 `continue-on-error` 후 outcome을 report가 읽음). schedule 실행 실패(또는 canary 실패) 시 `scripts/nightly-issue.mjs`가 `nightly-failure` 라벨 이슈를 열거나 댓글을 단다. **schedule은 기본 브랜치에서만 돌므로**, `feat/**`에 nightly.yml·chaos.yml을 바꾸는 push가 있으면 주간 job까지 전부 1회 돈다(이슈는 안 연다).
+  - `release.yml`: `gate`(ci.yml level=full) + `chaos`(필수 부분집합: `startup.test.ts` C1·C9, `rolling.test.ts` C11·C12) → `release`가 `needs: [gate, chaos]`. 계획의 C3(무응답)·C7(축출)은 해당 시나리오가 생기는 단계(P3·P6)에서 부분집합에 추가. 게시 방식(NPM_TOKEN, 태그 참조 액션, Node 20)은 P1에서 OIDC·SHA 고정·Node 24로 바꾼다.
+  - 워크플로 정적 검사: `docker run --rm -v <repo>:/repo -w /repo rhysd/actionlint`(로컬, 설치 불필요). 기존 gate의 `node -e` 따옴표 info 1건 외 지적 없음.
 
 ### 6.9 회귀 매핑 (1.0.6에서 먼저 실패)
 
@@ -346,6 +408,27 @@ setup(매트릭스 계산, pack → tgz artifact)          [P0c~]
 | 7-13 | static | — | README 코드 블록 추출 → contract-types 컴파일 |
 
 docs에서 이관된 검증: `prod-cache.spec.ts`(Redis 없이 200) → static-site e2e+C1 / `resilient-cache-handler.test.mjs` → fault+C3·C6 / `redis-connect.test.mjs` → fault / `build-keys.test.mjs` → integration+C11·C12 / `no-redis.test.mjs` → unit+static-site e2e.
+
+**P0d 재현 현황(1.0.6, 전부 기대 실패로 등록)** — 증거는 `NRC_REPRO=show`로 돌린 실제 실패 메시지.
+
+| ID | 재현 테스트(파일) | 1.0.6 실패 내용 |
+|---|---|---|
+| 7-1 | integration `repro.test.ts` 3건, oracle(durations), e2e full-cc·full-legacy 각 1건 | `updateTags(t,{expire:1y})` 뒤 쓴 항목 get → `undefined`, `getExpiration` = now+1년, 레거시 항목도 `null` / oracle 반례: 기준 `k0=hit:v1`, 우리 `k0=miss` / full-cc 'max' 후 origin 재호출 5회(기대 1) / 레거시 pinned 'max' 후 계속 404 |
+| 7-2 | fault `repro-connection.test.ts` 3건, chaos C1 2건·C9 1건 | 닫힌 포트에서 get 1.5s 내 미결(`settled:false`), hook throw가 reject로 전파, `cleanupOldBuildKeys` 3s 내 미결 / prewarm on 인스턴스 10s 내 준비 안 됨, 첫 페이지 5s 타임아웃(Redis 부재·잘못된 비밀번호) |
+| 7-3 | fault 2건, chaos C2 2건·C5 1건 | 닫힌 클라이언트에서 get 100회 → unhandledRejection 100건("The client is closed"), 재연결 중 get 100회 → 복구 후 GET 100건 재전송 / 트래픽 중 3초 장애 → unhandledRejection 171건(C2)·165건(C5), 복구 후 밀린 GET 3~22건 |
+| 7-4 | integration 4건, e2e static-site 1건 | 세그먼트 키 `['_full','_tree','about/__PAGE__']`(기대 `/` 시작), `/index` 없음, `/icon`(APP_ROUTE) 없음, `/_not-found` 미프리워밍 / 프리워밍된 `/about` `/_tree` prefetch 404 |
+| 7-5 | integration 2건 | 만료 후 `_tags` HLEN 50(기대 0), 깨진 필드 하나로 revalidateTag 전체 중단 → 항목 계속 서빙 |
+| 7-6 | integration 2건, e2e full-legacy 1건, chaos C6·C13 | `revalidateTag(t,{expire})` 후 get `null`, 명시 태그 무효화 전 렌더 결과가 fresh로 부활 / revalidatePath 후 404만 관측 / 네임스페이스 삭제 후 docs 404 / 느린 렌더 중 무효화 뒤 `HIT` + 옛 버전 |
+| 7-7 | fault 1건 | Redis hang 중 set 실패에 console.warn/error 0회 |
+| 7-8 | unit 1건, contract-types `@ts-expect-error` 2건 | peer 최저 메이저 15, 레거시 클래스가 Next `CacheHandlerContext`로 생성 불가(자체 context 타입의 index signature) |
+| 7-9 | integration 2건, chaos C11·C12 | 1만 키를 DEL 1회로 삭제(기대 ≥20회), 방금 읽힌 옛 빌드 키 삭제 / 롤링·롤백 중 옛 인스턴스 docs 404 |
+| 7-10 | unit 1건 | 성공 후 타이머 1개 잔존 |
+| 7-11 | unit 3건, integration 1건 | APP_ROUTE revalidate 5 → EX 47,304,000(1.5년), 정적 1.5년 > 30일, 이틀 전 lastModified 재시드 안 됨 / PTTL 47,304,000,000ms |
+| 7-12 | integration 3건 | NX 스킵인데 태그 `['b']`로 덮어씀, 다른 Pod가 쓴 값을 고아로 삭제, 겹친 set에서 get이 `first` 반환 |
+| 7-13 | unit 4건 | 기본 use-cache 키가 `uc:app:b1:…`(keyPrefix 밖), README `cacheLife("hours")` 주석 stale 3600(실제 300), Security 절 없음, "모든 Redis 호출 타임아웃" 주장 |
+| A2 | e2e static-site 1건 | 빈 Redis(프리워밍 없음)에서 `dynamicParams=false` docs 404 |
+
+1.0.6에서 통과하는(=버그가 아닌) 대조군도 같이 둔다: 즉시 만료 `updateTags(tags)`는 oracle과 일치(히트·미스 각 10건 이상 발생 확인), 레거시 핸들러는 ready 검사를 먼저 해 재연결 중 명령을 쌓지 않음, updateTag 서버 액션은 즉시 반영, C2·C5에서 I1(전부 200)·I4(10s 내 히트 재개)는 유지.
 
 ---
 
@@ -391,6 +474,23 @@ docs에서 이관된 검증: `prod-cache.spec.ts`(Redis 없이 200) → static-s
 | Q15 | canary는 nightly/weekly 실패 허용 + 이슈 알림 |
 | Q16 | 외부 커버리지 서비스 없음(artifact + Step Summary) |
 | Q17 | Windows CI는 docker 불필요 계층만. docker 계층은 로컬 Docker Desktop 수동 + Linux CI |
+| Q18 | (2026-09-29 사용자) PR 없이 CI 검증: ci.yml `push.branches`에 `feat/**`. 기능 브랜치 push만 허용(master·next push, force-push, npm 게시 금지) |
+| Q19 | (2026-09-29 사용자) Next 변형은 16.1.x·16.3.x 최신 패치 정확 고정 + 맞는 react. canary는 비고정·nightly 전용·실패 허용 |
+
+### 8.1 실행 중 결정 (P0c~P0e, 사용자가 위임한 범위에서 에이전트가 결정)
+
+| # | 결정 | 이유 |
+|---|---|---|
+| D1 | 테스트 앱은 JS(.jsx/.mjs) | 변형에 typescript 불필요, 빌드 가벼움. 타입은 contract-types가 검증 |
+| D2 | 테스트 훅 경로 `/api/nrc-test/*` | `__test`는 App Router private folder |
+| D3 | v1 어댑터 = README Quick Start 배선 그대로 | 재현 테스트가 실제 사용자 경험을 봐야 함 |
+| D4 | 재현 규약: `itRepro`/`repro()`/`@ts-expect-error [7-x]` + `NRC_REPRO=show` | 수정 커밋이 표식을 지워야만 green, 증거 출력 가능 |
+| D5 | perf 결정론 지표 = MONITOR로 센 요청당 명령 수 | `INFO commandstats`는 서버 전역이라 섞임 |
+| D6 | mutation = Stryker command runner | vitest-runner 10.0.0 + vitest 5에서 변이별 테스트 0건 보고 |
+| D7 | e2e 셀마다 앱 빌드, 브라우저 설치 없음 | 빌드 30~40초 < standalone artifact 이동, 서버 액션은 폼 제출로 검증 |
+| D8 | nightly.yml·chaos.yml을 바꾸는 `feat/**` push에서 nightly 1회 실행(주간 job 포함) | schedule은 기본 브랜치에서만 돌아 머지 전 검증 수단이 없음 |
+| D9 | release 필수 chaos 부분집합 = C1·C9·C11·C12(현재 구현분) | C3·C7은 해당 단계에서 추가 |
+| D10 | static-site 본문 100~250KB 텍스트(HTML 200~500KB) | 1MB HTML은 로컬 반복이 과도 |
 
 ---
 
@@ -405,6 +505,9 @@ docs에서 이관된 검증: `prod-cache.spec.ts`(Redis 없이 200) → static-s
 - fleet의 `node server.js`는 standalone 조립(`.next/static` 복사 등, docs `Dockerfile:31-40`과 동일)을 `prepare-app`이 재현해야 함.
 - OIDC + changesets/action 조합 미검증 → 첫 게시는 프리릴리스로.
 - 외부 사용자(월 4.4k 다운로드 추정) → 2.0 마이그레이션 가이드 필수, 1.x 핫픽스 유지.
+- `@redis/client` 6.x(6.2.1 출시)를 peer `>=5.0.0`이 허용하지만 테스트하지 않았다. P1(1.1.0)에서 peer 상한(`>=5 <6` 또는 `^5`)을 둘지, 6.x 매트릭스를 추가할지 결정해야 한다.
+- Stryker vitest-runner가 vitest 5를 제대로 지원하면 per-test 커버리지 모드로 되돌린다(현재 command runner라 변이마다 전체 실행).
+- Windows 로컬의 Defender 첫 열람 지연 — `.work/` 예외 권장(prepare-app이 흡수하지만 static-site 1벌에 3분 이상).
 
 ---
 
@@ -416,3 +519,7 @@ docs에서 이관된 검증: `prod-cache.spec.ts`(Redis 없이 200) → static-s
 | 2026-09-29 | — | 사용자 결정: 코드(비 .md 파일)는 영어만, `check-no-hangul` 게이트 추가 |
 | 2026-09-29 | P0a | 완료(로컬). typecheck·build·lint·test(35)·quality 통과, `check-pack`·`check-no-hangul` 음성 시험(위반 주입 시 exit 1) 확인. 빌드 산출물이 npm 1.0.6 tarball의 dist와 바이트 동일(=src 동작 불변). CI는 push 전이라 미실행 |
 | 2026-09-29 | P0b | 완료(로컬, Windows Docker Desktop 28.5.2). `infra:up`(기본·`all`·16mb 전환)·`infra:down`, integration 스모크 Redis 7.2.16/8.4.7 각 10건, toxic 4종(latency·timeout·reset_peer·bandwidth) 제어 스모크, fault 계층 5회 반복 무결, `test:all` 76건 통과. **Linux CI의 `infra:up`은 push 전이라 미검증** |
+| 2026-09-29 | P0b | Linux CI 검증: `feat/**` push 트리거(Q18) 추가 후 첫 실행 [36513562634](https://github.com/mirunamu00/next-redis-cache/actions/runs/36513562634) 8 job 전부 성공(fault job의 `infra:up -- redis84 toxiproxy`, integration 7.2/8.4 포함) → P0b 완료 기준 전부 충족 |
+| 2026-09-29 | P0c | 완료. 3앱 × 16.1.7·16.3.6 standalone 빌드(로컬 Windows·CI Linux), `npm ls` 단일 인스턴스 검사 통과, **npm 1.0.6 tarball**로 fleet 2인스턴스 e2e: 16.3 18건·16.1 18건 통과(스모크 13 + 기대 실패 5). cacheComponents 제약 빌드 오류로 확인. contract-types 16.1·16.3 통과. CI [36520127962](https://github.com/mirunamu00/next-redis-cache/actions/runs/36520127962)에서 setup·contract 2·e2e 3·perf 포함 15 job 성공. 계획 대비 변경은 6.2·6.3·6.4·8.1절 |
+| 2026-09-29 | P0d | 완료. 7-1~7-13 전부 + A2를 1.0.6에서 재현(6.9절 표, `NRC_REPRO=show` 출력으로 확인). vitest 기대 실패 50건(unit 9·fault 6·integration 17×2버전·contract 1) + chaos 10건 + e2e 5건 + tsc 2건. 로컬 `test:all` 87 통과 + 50 기대 실패, `test:chaos` 3 통과 + 10 기대 실패. perf 기준선 `tests/perf/baseline/1.0.6.json`(레거시 히트 3명령, use-cache 페이지 8명령, static-site 1벌 123키·116,060,896바이트) 커밋, CI perf 게이트가 Linux에서 같은 기준선으로 통과 |
+| 2026-09-29 | P0e | 완료. nightly를 `feat/**` push로 1회 완주: [36521161066](https://github.com/mirunamu00/next-redis-cache/actions/runs/36521161066) 34 job 중 33 성공·1 skip(report, schedule 전용), 22분 — ci level=full(e2e 12셀 = 3앱×[16.1,16.3]×[7.2,8.4], contract 16.1·16.3·canary, perf+timing, 병합 커버리지), chaos 전체, quarantine, e2e Node 24 3앱, mutation(22.3분), canary e2e. release는 `needs: [gate, chaos]`로 ci full + chaos 부분집합 없이는 게시 불가(actionlint 통과). mutation 점수 27.6%(로컬, 671 변이 — integration 계층이 빠진 docker 불필요 테스트 기준, 리포트 전용) |

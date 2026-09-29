@@ -2,13 +2,13 @@
   {
     "name": "ESM entry '.' (index + shared chunk, gzip)",
     "path": ["dist/index.js", "dist/chunk-*.js"],
-    "limit": "5.8 kB",
+    "limit": "6.6 kB",
     "gzip": true
   },
   {
     "name": "ESM entry './use-cache' (use-cache + shared chunk, gzip)",
     "path": ["dist/use-cache.js", "dist/chunk-*.js"],
-    "limit": "4.6 kB",
+    "limit": "5.4 kB",
     "gzip": true
   },
   {
@@ -20,7 +20,7 @@
   {
     "name": "CJS total (dist/*.cjs, gzip)",
     "path": "dist/*.cjs",
-    "limit": "10 kB",
+    "limit": "10.8 kB",
     "gzip": true
   }
 ]

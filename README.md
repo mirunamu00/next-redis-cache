@@ -2,18 +2,18 @@
 
 [![npm version](https://img.shields.io/npm/v/@mirunamu/next-redis-cache.svg)](https://www.npmjs.com/package/@mirunamu/next-redis-cache)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
-[![Next.js](https://img.shields.io/badge/Next.js-15%20%7C%2016-black)](https://nextjs.org)
+[![Next.js](https://img.shields.io/badge/Next.js-16-black)](https://nextjs.org)
 
 **Production-ready Redis cache handler for Next.js** — seamlessly supports both **legacy ISR** (`cacheHandler`) and the new **`"use cache"`** directive (`cacheHandlers`).
 
 ## Highlights
 
 - **Dual Handler Architecture** — Single package covers both `cacheHandler` (ISR/SSG pages) and `cacheHandlers` (React `"use cache"` directive)
-- **Tag-based Invalidation** — Full support for `revalidateTag()` and `revalidatePath()` with shared Redis state across instances
-- **Build Prewarming** — Provides `registerInitialCache()` to push static build output into Redis during the instrumentation phase, so the first request is always a cache hit
-- **Old Build Cleanup** — SCAN-based cleanup removes stale keys from previous deployments without blocking the event loop
-- **Timeout Protection** — Every Redis call is wrapped in a configurable timeout with graceful fallback to cache-miss behavior
-- **Concurrent Request Safety** — Deduplicates in-flight `set()` operations so parallel requests don't race against each other
+- **Tag-based Invalidation** — `revalidateTag()`, `updateTag()` and `revalidatePath()` with tag state shared across instances in Redis
+- **Build Prewarming** — `registerInitialCache()` pushes the prerendered build output (pages, route handlers, segment prefetch data) into Redis during the instrumentation phase
+- **Old Build Cleanup** — `cleanupOldBuildKeys()` removes keys of previous deployments with SCAN and batched UNLINK, bounded by a timeout
+- **Fail-safe Cache Commands** — Handler commands have a timeout (`timeoutMs`) and are never sent while the client is disconnected; failures become cache misses and are logged once per outage
+- **Read-after-write in Process** — A `"use cache"` read waits for an in-flight `set()` of the same key in the same process
 
 ## Installation
 
@@ -25,8 +25,8 @@ npm install @mirunamu/next-redis-cache
 
 | Package         | Version    |
 | --------------- | ---------- |
-| `next`          | `>=15.0.0` |
-| `@redis/client` | `>=5.0.0`  |
+| `next`          | `>=15.0.0` (16 is the tested and supported line, see [Compatibility](#compatibility)) |
+| `@redis/client` | `^5.0.0 \|\| ^6.0.0` |
 
 > **Note:** This package uses the official [`@redis/client`](https://www.npmjs.com/package/@redis/client) (part of `redis` v5+), not `ioredis`.
 
@@ -54,7 +54,12 @@ LegacyCacheHandler.onCreation(async (context) => {
   const { createClient } = await import("@redis/client");
   const client = createClient({ url: process.env.REDIS_URL });
   client.on("error", (err) => console.error("[Redis]", err.message));
-  await client.connect();
+  // Wait at most 1s for the first connection and keep connecting in the background.
+  // See "Connection Handling" below - do not await connect() without a bound.
+  await Promise.race([
+    client.connect().catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, 1000)),
+  ]);
 
   return {
     client,
@@ -96,7 +101,11 @@ if (
 
   const client = createClient({ url: process.env.REDIS_URL });
   client.on("error", (err) => console.error("[Redis]", err.message));
-  await client.connect();
+  // Same bounded wait as in cache-handler.mjs
+  await Promise.race([
+    client.connect().catch(() => {}),
+    new Promise((resolve) => setTimeout(resolve, 1000)),
+  ]);
 
   handler = createUseCacheHandler({
     client,
@@ -113,6 +122,8 @@ export default handler;
 ```
 
 > **Important:** Both handlers must use the **same `sharedTagsKey`, `sharedTagsTtlKey`, and `revalidatedTagsKey`** values so that `revalidateTag()` from the legacy handler also invalidates `"use cache"` entries and vice versa.
+
+> **Set `useCacheKeyPrefix` explicitly** (as above). Its default is `"uc:" + keyPrefix`, which puts `"use cache"` entries _outside_ your `keyPrefix` namespace, so a cleanup pattern such as `myapp:*` would never match them.
 
 ### Step 3 — Next.js Configuration
 
@@ -145,7 +156,7 @@ export async function register() {
       "@mirunamu/next-redis-cache/instrumentation"
     );
 
-    // Remove keys from previous builds
+    // Remove keys from previous builds (see "Old Build Cleanup" about rolling updates)
     if (process.env.REDIS_URL) {
       await cleanupOldBuildKeys({
         redisUrl: process.env.REDIS_URL,
@@ -193,10 +204,11 @@ Returned from the `onCreation` hook:
 
 ### cleanupOldBuildKeys Options
 
-| Option     | Type               | Description                                   |
-| ---------- | ------------------ | --------------------------------------------- |
-| `redisUrl` | `string`           | Redis connection URL (creates its own client) |
-| `patterns` | `CleanupPattern[]` | Array of scan/keep rules                      |
+| Option      | Type               | Description                                                                                      |
+| ----------- | ------------------ | ------------------------------------------------------------------------------------------------ |
+| `redisUrl`  | `string`           | Redis connection URL (creates its own client, closed when done)                                  |
+| `patterns`  | `CleanupPattern[]` | Array of scan/keep rules                                                                         |
+| `timeoutMs` | `number?`          | Connect timeout and per-command timeout in ms (default `5000`); the cleanup gives up after it |
 
 Each `CleanupPattern`:
 
@@ -227,7 +239,7 @@ import { LegacyCacheHandler } from "@mirunamu/next-redis-cache";
 | `onCreation`    | `static onCreation(hook: OnCreationHook): void`                            | Register an async hook that returns Redis config. Called once at module load time.                                                                       |
 | `get`           | `async get(key: string, ctx?: object): Promise<CacheHandlerValue \| null>` | Retrieve a cached entry. Returns `null` on miss, timeout, expiry, or tag staleness. The optional `ctx` may contain `softTags` for implicit tag checking. |
 | `set`           | `async set(key: string, data: unknown, ctx?: object): Promise<void>`       | Store a cache entry with serialized Buffers, tags, and TTL.                                                                                              |
-| `revalidateTag` | `async revalidateTag(tag: string \| string[]): Promise<void>`              | Invalidate all cache entries associated with the given tag(s).                                                                                           |
+| `revalidateTag` | `async revalidateTag(tag: string \| string[], durations?: { expire?: number }): Promise<void>` | Invalidate all cache entries associated with the given tag(s). `durations` is accepted but ignored in 1.x (entries are deleted). |
 
 ### Entry Point: `@mirunamu/next-redis-cache/use-cache`
 
@@ -244,8 +256,8 @@ Returns:
 | `get`           | `async get(cacheKey: string, softTags: string[]): Promise<CacheEntry \| undefined>` | Retrieve a `"use cache"` entry. Waits for any in-flight `set()` on the same key. |
 | `set`           | `async set(cacheKey: string, pendingEntry: Promise<CacheEntry>): Promise<void>`     | Await the pending entry promise, tee the stream, and store in Redis.             |
 | `refreshTags`   | `async refreshTags(): Promise<void>`                                                | No-op for Redis (shared state across instances).                                 |
-| `getExpiration` | `async getExpiration(tags: string[]): Promise<number>`                              | Returns the maximum revalidation timestamp for the given tags, or `0`.           |
-| `updateTags`    | `async updateTags(tags: string[], durations?: object): Promise<void>`               | Update tag revalidation timestamps in Redis.                                     |
+| `getExpiration` | `async getExpiration(tags: string[]): Promise<number>`                              | Returns the latest revalidation time (ms) of the given tags, or `0`. Never a future time. |
+| `updateTags`    | `async updateTags(tags: string[], durations?: { expire?: number }): Promise<void>`  | Records the current time as the tags' revalidation time (see Tag-based Invalidation). |
 
 ### Entry Point: `@mirunamu/next-redis-cache/instrumentation`
 
@@ -258,8 +270,8 @@ import {
 
 | Function                                       | Return                           | Description                                                                 |
 | ---------------------------------------------- | -------------------------------- | --------------------------------------------------------------------------- |
-| `registerInitialCache(CacheHandler, options?)` | `Promise<{ prewarmed: number }>` | Read `.next/prerender-manifest.json` and push all static routes into Redis. |
-| `cleanupOldBuildKeys(options)`                 | `Promise<{ deleted: number }>`   | SCAN Redis for old build keys and delete them in batch.                     |
+| `registerInitialCache(CacheHandler, options?)` | `Promise<{ prewarmed: number }>` | Read `.next/prerender-manifest.json` and push every prerendered App Router page and route handler into Redis. |
+| `cleanupOldBuildKeys(options)`                 | `Promise<{ deleted: number }>`   | SCAN Redis for old build keys and UNLINK them in batches of 500. Never rejects because of Redis; resolves with the number of keys deleted. |
 
 ## Features
 
@@ -281,9 +293,13 @@ The legacy handler performs **eager invalidation** — it scans and deletes cach
 
 The use-cache handler performs **lazy invalidation** — it records timestamps, and staleness is checked on read:
 
-1. Records the tag's revalidation timestamp in `revalidatedTagsKey` (for all tags)
+1. Records the current time as the tag's revalidation timestamp in `revalidatedTagsKey` (for all tags)
 2. On subsequent `get()` calls, compares the entry's `timestamp` against the tag's revalidation timestamp
-3. If the tag was revalidated after the entry was stored, the entry is considered stale
+3. If the tag was revalidated after the entry was stored, the entry is a miss and Next.js regenerates it
+
+`revalidateTag(tag, profile)` (for example `"max"`) and `updateTag(tag)` behave the same way in 1.x: the next read of an older entry regenerates it once, later reads are hits. Next.js' in-memory default handler instead serves the old entry once while it regenerates (stale-while-revalidate); that needs a second timestamp per tag and is planned for 2.0.
+
+> **Upgrading from 1.0.x:** 1.0.x recorded `now + expire` for `revalidateTag(tag, profile)`, which made every entry of that tag a miss until that future time (a year for `"max"`). 1.1 treats a stored time more than a minute in the future as "revalidated now" and rewrites it, so such tags recover after one regeneration.
 
 ```ts
 // app/actions.ts
@@ -328,20 +344,23 @@ You can customize the lifecycle per-route using Next.js `cacheLife()`:
 import { cacheLife } from "next/cache";
 
 export async function getCatalog() {
-  cacheLife("hours"); // stale: 1h, revalidate: 1h, expire: 1h
+  cacheLife("hours"); // stale: 5m, revalidate: 1h, expire: 1d
   return db.catalog.findMany();
 }
 ```
 
 ### Build Prewarming
 
-`registerInitialCache()` is designed to be called from your `instrumentation.ts` during the Next.js startup phase. It reads build output and pushes statically generated pages into Redis, eliminating cold starts:
+`registerInitialCache()` is designed to be called from your `instrumentation.ts` during the Next.js startup phase. It reads build output and pushes prerendered routes into Redis, so they are served from Redis without a render after a deployment:
 
 1. Reads `.next/prerender-manifest.json` (version 4)
-2. For each route, reads the corresponding files from disk:
-   - **App Pages**: `.html`, `.rsc`, `.meta`, and `.segments/` directory
-   - **App Routes**: `.body` and `.meta`
+2. For each route, reads the files the way Next.js' own file-system cache does, under Next's cache key (`/` is stored as `/index`):
+   - **App Pages**: `.html`, `.meta` (status, headers, postponed state, segment paths), `.rsc` (not for partially prerendered pages), and every segment listed in the meta (`.segments/<path>.segment.rsc`, keyed like `/_tree`), so client-side segment prefetches are cache hits
+   - **App Routes** (route handlers such as `icon` or OG images): `.body` and `.meta` (status, headers)
+   - The not-found page (`/_not-found`) keeps its 404 status
 3. Calls `CacheHandler.set()` with `setOnlyIfNotExists: true` (Redis NX flag) so existing cache entries are not overwritten
+
+Pages Router output is not prewarmed.
 
 ```ts
 const { prewarmed } = await registerInitialCache(CacheHandler, {
@@ -366,34 +385,63 @@ await cleanupOldBuildKeys({
 });
 ```
 
-Since all keys (cache data, tags, TTLs, revalidation) share the same `keyPrefix`, a single pattern is sufficient to clean up everything from previous builds.
+Since all keys (cache data, tags, TTLs, revalidation) share the same `keyPrefix`, a single pattern is sufficient to clean up everything from previous builds (with `useCacheKeyPrefix` inside it, see Step 2).
 
-The cleanup uses `SCAN` with `COUNT 200` to iterate keys without blocking the Redis server, and `DEL` to remove them in batch.
+The cleanup iterates with `SCAN` (`COUNT 200`) and deletes with `UNLINK` in batches of at most 500 keys while it scans, so memory stays bounded and no single command blocks Redis for long. Keys matched by several patterns are deleted and counted once. The cleanup opens its own connection with a connect timeout and no reconnect attempts; if Redis is unreachable or a command exceeds `timeoutMs`, it logs a warning and resolves with the keys deleted so far instead of hanging your startup.
+
+> **Rolling updates:** while a new build starts, instances of the previous build are still serving. Keeping only the current build (`keepPrefix` = the current build's prefix) deletes the previous build's keys immediately, so those instances start missing (and `dynamicParams = false` pages without a cache entry answer 404). Run the cleanup only after the old instances are gone, or keep the previous build's prefix as well.
 
 ### Concurrent Request Handling
 
-The `"use cache"` handler maintains a `pendingSets` Map that tracks in-flight `set()` operations by cache key. When a `get()` request arrives for a key that is currently being written:
+The `"use cache"` handler maintains a `pendingSets` Map that tracks in-flight `set()` operations by cache key. When a `get()` request arrives for a key that is currently being written **in the same process**:
 
 - Instead of immediately returning a cache miss, it **waits** for the pending write to complete
 - Then proceeds to read the entry from Redis (a single read, not a retry)
 
-This prevents a common race condition where multiple concurrent requests all experience cache misses and redundantly compute the same value.
+This only covers a read that arrives while a write of the same key is in flight in this process. It does not deduplicate renders across requests or instances — deciding when to render is up to Next.js.
 
 ### Error Recovery
 
-Every Redis operation is wrapped in a timeout (default: 5000ms). When a timeout or connection error occurs:
+Cache commands issued by the handlers have a timeout (`timeoutMs`, default 5000ms), and the handlers check `client.isReady` **before** sending a command: while the client is disconnected or reconnecting nothing is sent (and nothing piles up in the client's offline queue to be replayed after recovery). When a command is skipped, times out or fails:
 
 - **`get()`** returns `null` (legacy) or `undefined` (use-cache) — treated as a cache miss
-- **`set()`** silently fails — the entry is not cached, but the response is still served
-- **`revalidateTag()`** logs the error and continues
+- **`set()`** fails — the entry is not cached, but the response is still served
+- **`revalidateTag()`** / **`updateTags()`** fail for that call and the handler continues
 
-The handler also checks `client.isReady` before each operation. If the Redis connection is lost, all cache operations gracefully degrade to cache-miss behavior.
+Failures are always logged, without flooding the logs: the first failure of an outage is a `console.warn` (`[next-redis-cache] ...`), further failures are summarized at most once a minute, and the recovery is logged once with `console.info`.
+
+Not covered by `timeoutMs`: connecting the client (your code decides how long to wait, see Connection Handling) and `cleanupOldBuildKeys()` (its own `timeoutMs` option).
 
 Enable debug logging with:
 
 ```bash
 NEXT_PRIVATE_DEBUG_CACHE=1 npm run start
 ```
+
+### Connection Handling
+
+The handlers never connect the client themselves; they use the client you return from `onCreation` or pass to `createUseCacheHandler`. With `@redis/client`'s default reconnect strategy, `await client.connect()` does **not** settle while Redis is unreachable — and the legacy handler waits for your `onCreation` hook, so an unbounded `await` there stalls every cache call (and your pages) until Redis comes back.
+
+Bound the wait instead, as the Quick Start does:
+
+```js
+// Required: an "error" event without a listener crashes the process
+client.on("error", (err) => console.error("[Redis]", err.message));
+await Promise.race([
+  client.connect().catch(() => {}),
+  new Promise((resolve) => setTimeout(resolve, 1000)),
+]);
+```
+
+Until the client is ready, every cache call is a fast miss (nothing is sent); once it connects, the cache is used again.
+
+## Security
+
+Anyone who can write to the Redis database decides what your site serves: cache entries contain the complete HTML, RSC payloads and route handler responses that Next.js sends to users. Treat Redis write access like deploy access.
+
+- Require authentication (`requirepass` or ACL users) and keep Redis on a private network; use TLS (`rediss://`) when traffic leaves a trusted network.
+- Do not share the database with untrusted tenants or applications. `keyPrefix` separates namespaces; it is not an access boundary — use ACL key patterns if you need one.
+- Cache entries are parsed as JSON only (no code is evaluated), but their content is served as-is.
 
 ## Redis Key Structure
 
@@ -402,7 +450,7 @@ All Redis keys are composed from `keyPrefix` + suffix. This keeps every key unde
 ```
 # Cache data (String keys with TTL)
 {keyPrefix}{cacheKey}                     → ISR page cache (JSON)
-{useCacheKeyPrefix}{cacheKey}             → "use cache" entries (base64 JSON)
+{useCacheKeyPrefix}{cacheKey}             → "use cache" entries (base64 JSON; default prefix "uc:{keyPrefix}")
 
 # Tag management (Hash keys, auto-prefixed with keyPrefix)
 {keyPrefix}{sharedTagsKey}                → { cacheKey: JSON(tags[]) }
@@ -436,11 +484,14 @@ Replace `myapp` with your own app prefix (e.g., `docs`, `blog`). Ensure both han
 
 ## Compatibility
 
-| Requirement     | Version |
-| --------------- | ------- |
-| Next.js         | 15, 16  |
-| `@redis/client` | 5+      |
-| Node.js         | 18+     |
+| Requirement     | Version                                                            |
+| --------------- | ------------------------------------------------------------------ |
+| Next.js         | 16 (tested: 16.1, 16.3)                                            |
+| `@redis/client` | 5.x, 6.x (tested: 5.x end to end, 6.x with the integration suite)  |
+| Redis server    | tested: 7.2, 8.4                                                   |
+| Node.js         | `>=18.18` (`engines`; tested: 22, 24)                              |
+
+Next.js 15 is still admitted by the peer range of 1.x but is not tested, and its `"use cache"` handler interface (`expireTags`, variadic `getExpiration`) differs from what `createUseCacheHandler` implements — use the `"use cache"` handler with Next.js 16 only.
 
 Works with any deployment target: Vercel, Docker, self-hosted, or any Node.js runtime.
 

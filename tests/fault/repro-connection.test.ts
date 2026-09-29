@@ -75,6 +75,18 @@ describe("7-2 connection wiring from the README", () => {
     await expect(handler.get("/page", {})).resolves.toBeNull();
   });
 
+  // The wiring the README recommends since 1.1.0: wait at most 1s for the first connection, keep
+  // connecting in the background. Handlers send nothing while the client is not ready (7-3), so every
+  // call is a fast miss until Redis is reachable.
+  it("[7-2] the README's bounded connect lets legacy get settle as a miss within 1.5s", async () => {
+    const c = client(`redis://127.0.0.1:${await deadPort()}`);
+    const { handler } = await freshLegacy(async () => {
+      await Promise.race([c.connect().catch(() => {}), new Promise((r) => setTimeout(r, 1000))]);
+      return { client: c as never, keyPrefix: `${uniqueNamespace()}:` };
+    });
+    expect(await within(handler.get("/page", {}), 1500)).toEqual({ settled: true, value: null });
+  });
+
   // Fixed in 1.1.0 by 7-9 (connect timeout, no reconnect attempts, warning instead of a rejection)
   it("[7-2] cleanupOldBuildKeys gives up within 3s when Redis is unreachable", async () => {
     const { cleanupOldBuildKeys } = await freshInstrumentation();

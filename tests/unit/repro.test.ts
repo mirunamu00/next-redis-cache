@@ -1,5 +1,5 @@
 // Reproductions that need no network (ROADMAP.md 7-7, 7-8, 7-10, 7-11, 7-13). Each asserts the correct
-// behavior and is an expected failure on 1.0.6 (tests/support/repro.ts).
+// behavior; `itRepro` marks the ones still expected to fail (tests/support/repro.ts), plain `it` the fixed ones.
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -140,7 +140,7 @@ describe("7-13 README and defaults", () => {
     expect(key.startsWith("app:b1:")).toBe(true);
   });
 
-  itRepro("7-13", "README's cacheLife('hours') comment matches Next's built-in profile", () => {
+  it("[7-13] README's cacheLife('hours') comment matches Next's built-in profile", () => {
     const readme = repoFile("README.md");
     const comment = /cacheLife\("hours"\);\s*\/\/\s*stale:\s*(\w+),\s*revalidate:\s*(\w+),\s*expire:\s*(\w+)/.exec(readme);
     expect(comment, "README still documents cacheLife('hours')").not.toBeNull();
@@ -150,11 +150,11 @@ describe("7-13 README and defaults", () => {
     expect({ stale: seconds(comment![1]!), revalidate: seconds(comment![2]!), expire: seconds(comment![3]!) }).toEqual(hours);
   });
 
-  itRepro("7-13", "README has a security section (Redis write access means cache poisoning)", () => {
+  it("[7-13] README has a security section (Redis write access means cache poisoning)", () => {
     expect(repoFile("README.md")).toMatch(/^##+ Security/m);
   });
 
-  itRepro("7-13", "README does not promise that every Redis call has a timeout", () => {
+  it("[7-13] README does not promise that every Redis call has a timeout", () => {
     // cleanupOldBuildKeys connects without a timeout (7-2/7-9), so the blanket claim is false
     expect(repoFile("README.md")).not.toMatch(/Every Redis (call|operation) is wrapped in a (configurable )?timeout/);
   });

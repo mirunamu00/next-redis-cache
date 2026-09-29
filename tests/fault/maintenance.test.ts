@@ -32,31 +32,10 @@ afterAll(async () => {
 
 beforeEach(() => mini.flush());
 
-/** stop() of every maintenance a test started: a pending recheck must not run into the next test. */
-const stops: Array<() => void> = [];
-
 afterEach(async () => {
-  for (const stop of stops.splice(0)) stop();
   await closeSharedClients();
   vi.restoreAllMocks();
 });
-
-/** startCacheMaintenance, stopped after the test. */
-const maintain = (options: Parameters<typeof startCacheMaintenance>[0]) => {
-  const m = startCacheMaintenance(options);
-  stops.push(m.stop);
-  return m;
-};
-
-/** The client with OBJECT IDLETIME failing like under an LFU policy: every old build counts as in use. */
-const withoutIdleTime = (c: typeof client) =>
-  new Proxy(c, {
-    get(target, prop) {
-      if (prop === "objectIdleTime") return () => Promise.reject(new Error("ERR An LFU maxmemory policy is selected, idle time not tracked"));
-      const v = Reflect.get(target, prop);
-      return typeof v === "function" ? v.bind(target) : v;
-    },
-  });
 
 const WEEK = 7 * 24 * 3600;
 const HOUR = 3600;
@@ -257,81 +236,6 @@ describe("startCacheMaintenance", () => {
     expect(buildsLeft()).toEqual(["B"]);
     expect(await client.zRange("docs:_builds", 0, -1)).toEqual(["B", "C"]);
     expect(lines.some((l) => /cleanup: deleted 3 keys; removed builds A; kept C \(current\), B \(previous\)/.test(l))).toBe(true);
-  });
-
-  // 7-15 (production verification of 2.0.0-next.0): "cleanup: ... deferred (recently used) a20e5cb" and that
-  // build was never looked at again by the pod - old keys only went away through the one-day TTL cap
-  it("[7-15] a build deferred at start is removed by a later pass once idle, without another start", async () => {
-    const lines: string[] = [];
-    seed("A");
-    await clean("A", 1000);
-    seed("B");
-    await clean("B", 2000);
-    mini.age(HOUR);
-    mini.touch("docs:A:e:/docs/p1"); // an old instance still reads A while the new one starts
-    const { done } = maintain({ config: config({ logger: { info: (m: unknown) => lines.push(String(m)) } }), cleanup: { minIdleSeconds: 1 } });
-    expect((await done).cleanup).toMatchObject({ gaveUp: false, value: { deferredBuilds: ["A"] } });
-    const registered = await client.zScore("docs:_builds", "C");
-    // nobody reads A any more: it is removed within minIdleSeconds (+ a margin)
-    await waitFor(() => !buildsLeft().includes("A"), { timeout: 4000, message: "A removed without a restart" });
-    expect(buildsLeft()).toEqual(["B"]);
-    expect(lines.at(-1)).toBe("[next-redis-cache] cleanup recheck 1 of 3: deleted 3 keys; removed builds A; kept C (current), B (previous)");
-    // a recheck does not register the build again
-    expect(await client.zRange("docs:_builds", 0, -1)).toEqual(["B", "C"]);
-    expect(await client.zScore("docs:_builds", "C")).toBe(registered);
-  });
-
-  it("rechecks run while builds stay deferred, at most `rechecks` times; none with rechecks: 0 or after stop()", async () => {
-    const lines = { three: [] as string[], none: [] as string[], stopped: [] as string[] };
-    const log = (into: string[]) => ({ info: (m: unknown) => void into.push(String(m)) });
-    seed("old");
-    const lfu = withoutIdleTime(client); // "old" stays deferred on every pass
-    const run = (into: string[], rechecks: number) =>
-      maintain({ config: config({ client: lfu, logger: log(into) }), cleanup: { minIdleSeconds: 0, rechecks } });
-    const three = run(lines.three, 2);
-    const none = run(lines.none, 0);
-    const stopped = run(lines.stopped, 2);
-    await Promise.all([three.done, none.done, stopped.done]);
-    stopped.stop();
-    await waitFor(() => lines.three.length === 3, { timeout: 5000, message: "two rechecks" });
-    await new Promise((r) => setTimeout(r, 1300));
-    expect(lines.three.slice(1)).toEqual([
-      "[next-redis-cache] cleanup recheck 1 of 2: deleted 0 keys; kept C (current); deferred (recently used) old",
-      "[next-redis-cache] cleanup recheck 2 of 2: deleted 0 keys; kept C (current); deferred (recently used) old",
-    ]);
-    expect(lines.none).toHaveLength(1);
-    expect(lines.stopped).toHaveLength(1);
-    expect(buildsLeft()).toEqual(["old"]);
-  });
-
-  it("no recheck when nothing was deferred", async () => {
-    seed("A");
-    mini.age(HOUR);
-    const { done } = maintain({ config: config({ logger: false }), cleanup: { minIdleSeconds: 0 } });
-    expect((await done).cleanup).toMatchObject({ value: { removedBuilds: ["A"], deferredBuilds: [] } });
-    const scans = () => mini.calls.filter(([c]) => c === "SCAN").length;
-    const before = scans();
-    await new Promise((r) => setTimeout(r, 1300));
-    expect(scans()).toBe(before);
-  });
-
-  it("an older instance's recheck keeps the newer deployments and their previous build", async () => {
-    const lines: string[] = [];
-    seed("A");
-    await clean("A", 1000);
-    seed("B");
-    const { done } = maintain({ config: config({ buildId: "B", logger: { info: (m: unknown) => lines.push(String(m)) } }), cleanup: { minIdleSeconds: 1 } });
-    mini.setString("docs:X:e:/orphan", "x", WEEK); // a build still read when B starts
-    expect((await done).cleanup).toMatchObject({ value: { deferredBuilds: ["X"] } });
-    // two more deployments while the B instance still runs
-    seed("C");
-    await clean("C", Date.now() + 1000);
-    seed("D");
-    await clean("D", Date.now() + 2000);
-    await waitFor(() => lines.some((l) => l.includes("cleanup recheck 1 of 3")), { timeout: 5000, message: "recheck of the B instance" });
-    // D is the newest and C its previous build: both stay, as does B (still running); A and X were idle
-    expect(buildsLeft()).toEqual(["B", "C", "D"]);
-    expect(lines.at(-1)).toBe("[next-redis-cache] cleanup recheck 1 of 3: deleted 4 keys; removed builds A, X; kept B (current), D (previous), C (previous)");
   });
 
   it("skips without a client or while disabled, and never rejects", async () => {

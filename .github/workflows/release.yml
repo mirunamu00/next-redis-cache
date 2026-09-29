@@ -1,9 +1,23 @@
-# Release (changesets). Publishing is gated (ROADMAP.md section 6.8): the release job needs the full CI
-# matrix (ci.yml level=full) and the required chaos subset. A commit that fails either cannot publish.
+# Release (changesets + npm trusted publishing). Publishing is gated (ROADMAP.md section 6.8): the
+# release job needs the full CI matrix (ci.yml level=full) and the required chaos subset. A commit that
+# fails either cannot publish.
 #
 # Required chaos subset: startup without Redis (C1, C9) and rolling update/rollback (C11, C12). C3
 # (unresponsive Redis) and C7 (eviction pressure) join the subset when they are implemented.
-# Trusted publishing (OIDC), SHA-pinned actions for the release job and Node 24 come in P1.
+#
+# Authentication is npm trusted publishing (OIDC): no npm token exists in this workflow or in the repo
+# secrets. npm >= 11.5.1 exchanges the job's GitHub OIDC token (id-token: write) for a short-lived
+# publish token, which only works after the package's Trusted Publisher is set to this repository and
+# workflow file (npmjs.com package settings, or `npm trust github` - see ROADMAP.md section 6.8).
+# Provenance attestations are generated for every publish (NPM_CONFIG_PROVENANCE).
+#
+# Flow (changesets/action v1): pending changesets on master -> it opens/updates the "chore: release" PR
+# (version bump + CHANGELOG). Merging that PR -> no pending changesets -> `changeset publish` publishes
+# every version not yet on npm, then tags and creates the GitHub release.
+#
+# Actions are pinned to commit SHAs (the comment is the tag). setup-node gets no registry-url on purpose:
+# that would write an .npmrc expecting NODE_AUTH_TOKEN, and changesets/action only takes the OIDC path
+# when NPM_TOKEN is unset.
 name: Release
 
 on:
@@ -11,7 +25,9 @@ on:
     branches:
       - master
 
-concurrency: ${{ github.workflow }}-${{ github.ref }}
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -32,20 +48,26 @@ jobs:
   release:
     name: Release
     needs: [gate, chaos]
+    if: github.repository == 'mirunamu00/next-redis-cache'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions:
-      contents: write
-      pull-requests: write
-      id-token: write
+      contents: write # release commit, tags, GitHub releases
+      pull-requests: write # the "chore: release" PR
+      id-token: write # npm trusted publishing (OIDC) and provenance
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 20
-          registry-url: "https://registry.npmjs.org"
+          node-version: 24
+
+      - name: npm with trusted publishing support (>= 11.5.1)
+        run: |
+          npm install -g npm@11.20.0
+          npm --version
 
       - name: Install dependencies
         run: npm ci
@@ -55,11 +77,12 @@ jobs:
 
       - name: Create Release PR or Publish
         id: changesets
-        uses: changesets/action@v1
+        uses: changesets/action@a45c4d594aa4e2c509dc14a9f2b3b67ba3780d0d # v1.9.0
         with:
           publish: npx changeset publish
           title: "chore: release"
           commit: "chore: release"
         env:
+          # changelog-github (changeset version) and the release PR need it; not an npm credential
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_PROVENANCE: "true"

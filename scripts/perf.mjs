@@ -1,7 +1,10 @@
 // perf layer (ROADMAP.md section 6.5, "perf gate"): measures a package build against Redis and compares
 // with the committed baseline (tests/perf/baseline/<version>.json).
 //
-//   node scripts/perf.mjs [--variant next-16.3] [--redis url] [--check] [--update-baseline] [--time] [--out reports/perf.json]
+//   node scripts/perf.mjs [--variant next-16.3] [--redis url] [--check] [--update-baseline [--as <version>]] [--time] [--out reports/perf.json]
+//
+// --as names the baseline file (default: the installed package version). Needed while a release is being
+// prepared: the working tree still says the previous version until `changeset version` bumps it.
 //
 // Deterministic metrics (hard gate with --check):
 //   legacyHit.commandsPerRequest    Redis commands per cached static page (static-site /docs page)
@@ -27,6 +30,7 @@ const { values } = parseArgs({
     redis: { type: "string", default: DEFAULT_REDIS_URL },
     check: { type: "boolean", default: false },
     "update-baseline": { type: "boolean", default: false },
+    as: { type: "string" },
     time: { type: "boolean", default: false },
     out: { type: "string", default: "reports/perf.json" },
     requests: { type: "string", default: "20" },
@@ -214,7 +218,8 @@ const cc = await fullCc();
 admin.destroy();
 
 const report = {
-  package: pkg.version,
+  package: values.as ?? pkg.version,
+  ...(values.as && values.as !== pkg.version ? { packageVersionField: pkg.version } : {}),
   next,
   redis: redisVersion,
   measuredAt: new Date().toISOString(),
@@ -226,7 +231,7 @@ writeJson(path.join(REPO_ROOT, values.out), report);
 console.log(JSON.stringify(report, null, 2));
 
 if (values["update-baseline"]) {
-  const file = path.join(BASELINE_DIR, `${pkg.version}.json`);
+  const file = path.join(BASELINE_DIR, `${values.as ?? pkg.version}.json`);
   writeJson(file, report);
   log(`baseline written: ${path.relative(REPO_ROOT, file)}`);
 }

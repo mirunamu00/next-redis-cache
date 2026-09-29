@@ -1,6 +1,6 @@
 {
   "name": "@mirunamu/next-redis-cache",
-  "version": "1.0.6",
+  "version": "1.1.0",
   "description": "Redis cache handler for Next.js 16 — supports both legacy cacheHandler (ISR) and use-cache cacheHandlers",
   "license": "MIT",
   "author": "mirunamu00",

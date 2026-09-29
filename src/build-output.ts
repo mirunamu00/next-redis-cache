@@ -31,6 +31,42 @@ type FileSystemCacheClass = new (ctx: Record<string, unknown>) => FileSystemCach
 
 export interface PrerenderRoute {
   initialRevalidateSeconds?: number | false;
+  srcRoute?: string | null;
+}
+
+interface PrerenderManifest {
+  routes: Record<string, PrerenderRoute>;
+  dynamicRoutes: Record<string, { fallback?: string | false | null }>;
+}
+
+const manifests = new Map<string, Promise<PrerenderManifest>>();
+
+/** prerender-manifest.json next to `serverDistDir` (read once; empty when missing or unreadable). */
+export function prerenderManifest(serverDistDir: string): Promise<PrerenderManifest> {
+  let manifest = manifests.get(serverDistDir);
+  if (!manifest) {
+    manifest = fsp
+      .readFile(path.join(serverDistDir, "..", "prerender-manifest.json"), "utf8")
+      .then((raw) => {
+        const m = JSON.parse(raw) as Partial<PrerenderManifest>;
+        return { routes: m.routes ?? {}, dynamicRoutes: m.dynamicRoutes ?? {} };
+      })
+      .catch(() => ({ routes: {}, dynamicRoutes: {} }));
+    manifests.set(serverDistDir, manifest);
+  }
+  return manifest;
+}
+
+/**
+ * True when a cache miss for `key` would answer 404: a prerendered path of a dynamic route without
+ * fallback (`dynamicParams = false`). Unknown (no manifest) counts as true - the safe answer.
+ */
+export async function missWouldNotFound(serverDistDir: string | undefined, key: string): Promise<boolean> {
+  if (!serverDistDir) return true;
+  const { routes, dynamicRoutes } = await prerenderManifest(serverDistDir);
+  if (Object.keys(routes).length === 0) return true;
+  const src = routes[routeOfCacheKey(key)]?.srcRoute;
+  return Boolean(src && dynamicRoutes[src]?.fallback === false);
 }
 
 /** Minimal fs for FileSystemCache when Next's own is not at hand (prewarm): it only reads and stats. */
@@ -68,7 +104,6 @@ export class BuildOutput {
   readonly #fs: unknown;
   readonly #logger: ResolvedLogger;
   #cache: Promise<FileSystemCacheInstance | null> | undefined;
-  #routes: Promise<Record<string, PrerenderRoute>> | undefined;
 
   constructor(serverDistDir: string, fs: unknown, logger: ResolvedLogger) {
     this.serverDistDir = serverDistDir;
@@ -105,12 +140,8 @@ export class BuildOutput {
   }
 
   /** prerender-manifest.json routes (empty when missing or unreadable). */
-  routes(): Promise<Record<string, PrerenderRoute>> {
-    this.#routes ??= fsp
-      .readFile(path.join(this.serverDistDir, "..", "prerender-manifest.json"), "utf8")
-      .then((raw) => (JSON.parse(raw) as { routes?: Record<string, PrerenderRoute> }).routes ?? {})
-      .catch(() => ({}));
-    return this.#routes;
+  async routes(): Promise<Record<string, PrerenderRoute>> {
+    return (await prerenderManifest(this.serverDistDir)).routes;
   }
 
   /** initialRevalidateSeconds of a prerendered key; undefined when it is not a prerendered route. */

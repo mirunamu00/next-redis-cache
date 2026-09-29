@@ -103,14 +103,31 @@ export interface RedisCacheConfig {
   fallback?: FallbackOptions | false;
   ttl?: TtlOptions;
   /**
-   * What the legacy handler does with a page whose tag expired (revalidatePath, updateTag):
-   * "stale" (default) serves it once while Next regenerates it in the background, like Next's own
-   * file-system cache; "miss" returns nothing, so the request waits for a fresh render
-   * (a `dynamicParams = false` page then answers 404 until the render finishes).
+   * What the legacy handler answers for a page or route handler whose tag expired (updateTag,
+   * revalidatePath, revalidateTag without a profile):
+   * - "auto" (default): a miss, so Next renders it before answering (Next's own file-system cache does
+   *   the same) - except for a prerendered path of a `dynamicParams = false` route, where a miss is a
+   *   404: that one is answered like "stale". Uses prerender-manifest.json; without it, like "stale".
+   * - "stale": the old entry with lastModified -1 (Next 16.3+ renders before answering, 16.1 answers
+   *   with it once and regenerates in the background) - never a 404.
+   * - "miss": always a miss (a `dynamicParams = false` page answers 404 until it is rendered again).
+   * Tags marked stale by revalidateTag(tag, profile) are always answered like "stale". Fetch entries with
+   * an expired tag are always a miss.
    */
-  onTagExpired?: "stale" | "miss";
-  /** Compression of stored values. Default "none". */
+  onTagExpired?: "auto" | "stale" | "miss";
+  /**
+   * Compression of stored values (entries of 1 KiB and more). Default "brotli" (quality 4): about 85%
+   * less Redis memory for typical HTML/RSC payloads at no measurable latency cost. Entries written with
+   * any setting stay readable with any other.
+   */
   compression?: Compression;
+  /**
+   * Per-field TTL of the shared tag state (Redis >= 7.4, HEXPIRE), counted from the latest time an
+   * invalidation records. Default: none - the tag state is bounded by the number of tags (Q10). Choose a
+   * value above ttl.maxSeconds: once a field expires, entries older than that invalidation (including the
+   * build output of a build that is still running) count as fresh again.
+   */
+  tagStateTtlSeconds?: number;
   /**
    * Logger (default: console for info/warn/error, debug only with NEXT_PRIVATE_DEBUG_CACHE).
    * `false` silences the package.

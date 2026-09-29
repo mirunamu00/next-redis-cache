@@ -1,7 +1,8 @@
 // Build-output fallback and re-seeding (ROADMAP.md 5.4, A2): prerendered pages and route handlers answer
 // from `.next/server/app` (read by Next's own FileSystemCache) when Redis has nothing or is unavailable.
 // Uses the next-build fixture (a Next 16.3.6 static-site build) and an in-memory client.
-import { statSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -72,13 +73,44 @@ describe("serving from the build output", () => {
   });
 });
 
+/** A copy of the fixture where /about is a prerendered path of a dynamicParams = false route. */
+function fallbackFalseCopy() {
+  const root = mkdtempSync(path.join(tmpdir(), "nrc-ff-"));
+  cpSync(path.join(SERVER_DIST, ".."), root, { recursive: true });
+  const file = path.join(root, "prerender-manifest.json");
+  const manifest = JSON.parse(readFileSync(file, "utf8"));
+  manifest.routes["/about"].srcRoute = "/[page]";
+  manifest.dynamicRoutes = { "/[page]": { fallback: false } };
+  writeFileSync(file, JSON.stringify(manifest));
+  return { serverDistDir: path.join(root, "server"), cleanup: () => rmSync(root, { recursive: true, force: true }) };
+}
+
 describe("tag state of build-output entries", () => {
-  it("a page invalidated after the build is served stale (lastModified -1), never a 404", async () => {
+  it("a page invalidated after the build is a miss, so Next renders it before answering (onTagExpired auto)", async () => {
     const { handler, events } = setup();
     await handler.revalidateTag("_N_T_/about");
-    const got = await handler.get("/about", PAGE);
-    expect(got?.lastModified).toBe(-1);
-    expect(got?.value.html).toContain("<html");
+    expect(await handler.get("/about", PAGE)).toBeNull();
+    expect(events.at(-1)).toMatchObject({ type: "miss", reason: "tag" });
+  });
+
+  it("a prerendered path of a dynamicParams=false route is served stale instead (a miss would be a 404)", async () => {
+    const copy = fallbackFalseCopy();
+    try {
+      const { client } = fakeRedis();
+      const { handler } = legacyHandler({ client, fallback: {} }, copy.serverDistDir);
+      await handler.revalidateTag("_N_T_/about");
+      const got = await handler.get("/about", PAGE);
+      expect(got?.lastModified).toBe(-1);
+      expect(got?.value.html).toContain("<html");
+    } finally {
+      copy.cleanup();
+    }
+  });
+
+  it("onTagExpired: \"stale\" serves the invalidated page with lastModified -1", async () => {
+    const { handler, events } = setup({ onTagExpired: "stale" });
+    await handler.revalidateTag("_N_T_/about");
+    expect((await handler.get("/about", PAGE))?.lastModified).toBe(-1);
     expect(events).toContainEqual({ type: "fallback", handler: "legacy", key: "/about", state: "stale" });
   });
 

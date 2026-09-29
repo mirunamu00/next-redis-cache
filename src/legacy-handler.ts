@@ -7,9 +7,10 @@
  * get   GET entry (+ HMGET of the request's tags, same round trip) -> HMGET of the entry's remaining
  *       tags (second round trip, only when needed). Tag semantics are Next's own (ROADMAP.md 5.2):
  *         FETCH       expired tag -> miss, stale tag -> served stale (lastModified -1)
- *         pages/routes expired or stale tag -> served stale (lastModified -1: Next answers with it and
- *                     regenerates in the background) - or a miss with onTagExpired: "miss"
- *       Returning null for a prerendered page would make a `dynamicParams = false` route answer 404.
+ *         pages/routes stale tag -> lastModified -1 (Next regenerates it: in the background on 16.1,
+ *                     before answering on 16.3+); expired tag -> a miss (Next renders before answering),
+ *                     except where a miss would be a 404 (prerendered path of a `dynamicParams = false`
+ *                     route): lastModified -1 there (onTagExpired "auto"; "stale" and "miss" force one)
  * set   one SET with EX (TTL from the write, 7-11) - no side hashes, nothing to go out of sync (7-12).
  * revalidateTag(tags, durations)  one HSET of the shared tag state; no key is deleted (7-5, 7-6).
  *
@@ -18,13 +19,14 @@
  * the render is running is newer than the entry, so the entry is served stale and regenerated again
  * instead of passing as fresh (7-6, chaos C13).
  */
-import { BUILD_OUTPUT_KINDS, BuildOutput, type BuildOutputEntry } from "./build-output";
+import { BUILD_OUTPUT_KINDS, BuildOutput, missWouldNotFound, type BuildOutputEntry } from "./build-output";
 import { buildIdResolver, resolveConfig, type ResolvedConfig } from "./config";
 import { decodeEnvelope, encodeEnvelope, EnvelopeFormatError } from "./envelope";
 import { entryKey, tagStateKey } from "./keys";
 import { FailureReporter, reportFailure } from "./logger";
 import { isUnavailable, Runner } from "./runner";
-import { areTagsExpired, areTagsStale, missingTags, parseTagFields, tagFields, updateFields, type TagTable } from "./tag-state";
+import { areTagsExpired, areTagsStale, missingTags, parseTagFields, tagFields, type TagTable } from "./tag-state";
+import { TagStateWriter } from "./tag-writer";
 import { setOptions, ttlSeconds } from "./ttl";
 import type {
   LegacyCacheHandlerClass,
@@ -92,6 +94,7 @@ export class LegacyCore {
   readonly reporter: FailureReporter;
   readonly #renders = new RenderStarts();
   readonly #reseeding = new Set<string>();
+  readonly #tags: TagStateWriter;
   #output: BuildOutput | null | undefined;
   readonly #buildId: (distDir?: string) => string;
   /** First non-empty context seen (Next passes the same one to every instance). */
@@ -102,6 +105,7 @@ export class LegacyCore {
     this.runner = new Runner(cfg);
     this.reporter = new FailureReporter("legacy", cfg.logger);
     this.#buildId = buildIdResolver(cfg);
+    this.#tags = new TagStateWriter(this.runner, cfg);
   }
 
   observe(ctx: LegacyHandlerContext | undefined): void {
@@ -174,7 +178,7 @@ export class LegacyCore {
     const tags = unique(entryTags, requestTags);
     const isFetch = ctx.kind === "FETCH" || (value as { kind?: string } | null)?.kind === "FETCH";
     if (areTagsExpired(tags, table, meta.lastModified, now)) {
-      if (isFetch || cfg.onTagExpired === "miss") {
+      if (isFetch || !(await this.#expiredAsStale(cacheKey))) {
         this.#renders.mark(cacheKey, now);
         cfg.emit({ type: "miss", handler: "legacy", key: cacheKey, reason: "tag" });
         return null;
@@ -187,6 +191,12 @@ export class LegacyCore {
     if (typeof meta.revalidate === "number" && now > meta.lastModified + meta.revalidate * 1000) this.#renders.mark(cacheKey, now);
     cfg.emit({ type: "hit", handler: "legacy", key: cacheKey });
     return { lastModified: meta.lastModified, value };
+  }
+
+  /** Whether an entry with an expired tag is answered stale (lastModified -1) rather than as a miss. */
+  async #expiredAsStale(cacheKey: string): Promise<boolean> {
+    if (this.cfg.onTagExpired !== "auto") return this.cfg.onTagExpired === "stale";
+    return missWouldNotFound(this.context.serverDistDir, cacheKey);
   }
 
   #stale(cacheKey: string, value: unknown, now: number): LegacyCacheValue {
@@ -241,7 +251,7 @@ export class LegacyCore {
         }
       }
     }
-    if (state === "expired" && cfg.onTagExpired === "miss") {
+    if (state === "expired" && !(await this.#expiredAsStale(cacheKey))) {
       cfg.emit({ type: "miss", handler: "legacy", key: cacheKey, reason: "tag" });
       return null;
     }
@@ -309,9 +319,8 @@ export class LegacyCore {
   async revalidateTag(tags: string | string[], durations?: { expire?: number }): Promise<void> {
     const list = unique(typeof tags === "string" ? [tags] : (tags ?? []));
     if (list.length === 0 || this.cfg.isDisabled()) return;
-    const fields = updateFields(list, durations, Date.now());
     try {
-      await this.runner.run("write", (client) => client.hSet(tagStateKey(this.cfg.namespace), fields));
+      await this.#tags.write(list, durations);
       this.reporter.success();
     } catch (err) {
       this.#failed("revalidateTag", list.join(","), err);

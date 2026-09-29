@@ -30,9 +30,9 @@ import {
   softTagsDiscard,
   tagFields,
   TagStateCache,
-  updateFields,
   type TagTable,
 } from "./tag-state";
+import { TagStateWriter } from "./tag-writer";
 import { setOptions } from "./ttl";
 import type { CacheEvent, UseCacheConfig, UseCacheEntry, UseCacheHandler } from "./types";
 
@@ -69,6 +69,7 @@ export function createUseCacheHandler(config: UseCacheConfig): UseCacheHandler {
   const tagCache = new TagStateCache(tagCacheMs);
   const runner = new Runner(cfg);
   const reporter = new FailureReporter("use-cache", cfg.logger);
+  const tagWriter = new TagStateWriter(runner, cfg);
   const buildId = buildIdResolver(cfg);
   const tagKey = tagStateKey(cfg.namespace);
   const keyOf = (cacheKey: string) => useCacheKey(cfg.namespace, buildId(), cacheKey);
@@ -225,9 +226,8 @@ export function createUseCacheHandler(config: UseCacheConfig): UseCacheHandler {
     async updateTags(tags, durations) {
       const list = unique(tags);
       if (list.length === 0 || cfg.isDisabled()) return;
-      const fields = updateFields(list, durations, Date.now());
       try {
-        await runner.run("write", (client) => client.hSet(tagKey, fields));
+        await tagWriter.write(list, durations);
         reporter.success();
       } catch (err) {
         failed("updateTags", list.join(","), err);

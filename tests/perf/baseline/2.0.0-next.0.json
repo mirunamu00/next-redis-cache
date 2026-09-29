@@ -1,0 +1,55 @@
+{
+  "package": "2.0.0-next.0",
+  "packageVersionField": "1.1.0",
+  "next": "16.3.6",
+  "redis": "8.4.7",
+  "measuredAt": "2026-09-29T08:14:31.819Z",
+  "platform": "win32 node v22.21.1",
+  "deterministic": {
+    "legacyHit": {
+      "requests": 20,
+      "commandsPerRequest": 2,
+      "byHandlerPerRequest": {
+        "legacy": 1,
+        "tagState": 1
+      },
+      "byCommandPerRequest": {
+        "GET": 1,
+        "HMGET": 1
+      }
+    },
+    "useCacheHit": {
+      "requests": 20,
+      "commandsPerRequest": 6,
+      "byHandlerPerRequest": {
+        "legacy": 2,
+        "tagState": 3,
+        "useCache": 1
+      },
+      "byCommandPerRequest": {
+        "GET": 3,
+        "HMGET": 3
+      }
+    },
+    "staticSiteBuild": {
+      "keys": 176,
+      "memoryBytes": 17424668
+    }
+  },
+  "timing": {
+    "legacyHit": {
+      "path": "/docs/guide/doc-0",
+      "p50": 44,
+      "p99": 66,
+      "requestsPerSec": 175.5,
+      "non2xx": 0
+    },
+    "useCacheHit": {
+      "path": "/dyn/1",
+      "p50": 39,
+      "p99": 58,
+      "requestsPerSec": 197.6,
+      "non2xx": 0
+    }
+  }
+}

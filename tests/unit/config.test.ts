@@ -26,8 +26,9 @@ describe("resolveConfig", () => {
       reseed: true,
       staticSeconds: 30 * 24 * 3600,
       maxSeconds: 365 * 24 * 3600,
-      onTagExpired: "stale",
-      compression: "none",
+      onTagExpired: "auto",
+      compression: "brotli",
+      tagStateTtlSeconds: 0,
     });
     expect(cfg.estimateExpire(10)).toBe(15);
     expect(cfg.isDisabled()).toBe(false);
@@ -61,6 +62,7 @@ describe("resolveConfig", () => {
     [{ namespace: "a", circuitBreaker: { openMs: -1 } }, /openMs/],
     [{ namespace: "a", compression: "zip" }, /compression/],
     [{ namespace: "a", onTagExpired: "drop" }, /onTagExpired/],
+    [{ namespace: "a", tagStateTtlSeconds: 0 }, /tagStateTtlSeconds/],
   ])("rejects invalid options %j", (options, message) => {
     expect(() => resolveConfig({ client: null, ...(options as object) } as never)).toThrow(message);
   });

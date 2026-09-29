@@ -45,12 +45,26 @@ export function recordError(where, err) {
   if (list.length > 20) list.shift();
 }
 
+/**
+ * TEST_CLOCK_OFFSET_MS (chaos C14): shifts this process' clock (Date.now and performance.now) by the given
+ * milliseconds, to replay clock skew between instances. Applied once, as early as instrumentation runs.
+ */
+function installClockOffset() {
+  const offset = Number(process.env.TEST_CLOCK_OFFSET_MS ?? 0);
+  if (!offset) return;
+  const realDateNow = Date.now.bind(Date);
+  const realPerfNow = performance.now.bind(performance);
+  Date.now = () => realDateNow() + offset;
+  performance.now = () => realPerfNow() + offset;
+}
+
 /** Registers process-level listeners once (called from instrumentation). */
 export function installProcessHooks() {
   if (!hooksEnabled()) return;
   const state = testState();
   if (state.processHooksInstalled) return;
   state.processHooksInstalled = true;
+  installClockOffset();
   process.on("unhandledRejection", (reason) => {
     state.unhandledRejections += 1;
     recordError("unhandledRejection", reason);

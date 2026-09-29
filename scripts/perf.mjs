@@ -2,6 +2,7 @@
 // with the committed baseline (tests/perf/baseline/<version>.json).
 //
 //   node scripts/perf.mjs [--variant next-16.3] [--redis url] [--check] [--update-baseline [--as <version>]] [--time] [--out reports/perf.json]
+//                         [--compression none|gzip|brotli]   (2.x: NRC_COMPRESSION for the fleets; default = the package default)
 //
 // --as names the baseline file (default: the installed package version). Needed while a release is being
 // prepared: the working tree still says the previous version until `changeset version` bumps it.
@@ -34,11 +35,14 @@ const { values } = parseArgs({
     time: { type: "boolean", default: false },
     out: { type: "string", default: "reports/perf.json" },
     requests: { type: "string", default: "20" },
+    compression: { type: "string" },
   },
 });
 const N = Number(values.requests);
 const BASELINE_DIR = path.join(REPO_ROOT, "tests", "perf", "baseline");
 const log = (m) => console.log(`[perf] ${m}`);
+/** Extra fleet environment (2.x options) */
+const fleetEnv = values.compression ? { NRC_COMPRESSION: values.compression } : {};
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 /** Records every command that touches `namespace` (MONITOR on a dedicated connection). */
@@ -112,7 +116,7 @@ async function timingOf(fleet, p) {
 }
 
 async function staticSite(admin) {
-  const fleet = await startFleet({ app: "static-site", variant: values.variant, instances: 1, redisUrl: values.redis, env: { NRC_PREWARM: "1" } });
+  const fleet = await startFleet({ app: "static-site", variant: values.variant, instances: 1, redisUrl: values.redis, env: { NRC_PREWARM: "1", ...fleetEnv } });
   try {
     const page = "/docs/guide/doc-0";
     const legacyHit = await commandsPerRequest(fleet, page);
@@ -131,7 +135,7 @@ async function staticSite(admin) {
 }
 
 async function fullCc() {
-  const fleet = await startFleet({ app: "full-cc", variant: values.variant, instances: 1, redisUrl: values.redis });
+  const fleet = await startFleet({ app: "full-cc", variant: values.variant, instances: 1, redisUrl: values.redis, env: fleetEnv });
   try {
     const page = "/dyn/1";
     const useCacheHit = await commandsPerRequest(fleet, page);
@@ -224,6 +228,7 @@ const report = {
   redis: redisVersion,
   measuredAt: new Date().toISOString(),
   platform: `${process.platform} node ${process.version}`,
+  ...(values.compression ? { compression: values.compression } : {}),
   deterministic: { legacyHit: ss.legacyHit, useCacheHit: cc.useCacheHit, staticSiteBuild: ss.staticSiteBuild },
   timing: values.time ? { legacyHit: ss.timing, useCacheHit: cc.timing } : undefined,
 };

@@ -1,5 +1,6 @@
 // Legacy handler behavior against an in-memory client (ROADMAP.md 5.2): one SET per write, lazy tag
 // invalidation, Next's stale/expired semantics, and render-start timestamps (7-6, C13).
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { entryKey } from "../../src/keys";
 import type { CacheEvent } from "../../src/types";
@@ -107,7 +108,7 @@ describe("tag invalidation (no key is deleted)", () => {
     expect(Object.keys(fake.calls[1]!.args[1] as object)).toEqual(["s:c", "x:c"]);
   });
 
-  it("a page with an expired tag is served stale (lastModified -1) by default", async () => {
+  it("a page with an expired tag is served stale (lastModified -1) when the route is unknown (no build output)", async () => {
     const { fake, handler, events } = setup();
     await handler.set("/p", page(["t"]), {});
     await new Promise((r) => setTimeout(r, 2));
@@ -116,6 +117,16 @@ describe("tag invalidation (no key is deleted)", () => {
     expect(got?.lastModified).toBe(-1);
     expect(got?.value.html).toBe("<p>x</p>");
     expect(events.at(-1)).toMatchObject({ type: "stale" });
+    expect(fake.count("unlink")).toBe(0);
+  });
+
+  it("onTagExpired auto: a miss for a route that renders on demand (known from prerender-manifest.json)", async () => {
+    const { fake, client } = fakeRedis();
+    const { handler } = legacyHandler({ client }, fileURLToPath(new URL("../fixtures/next-build/.next/server/", import.meta.url)));
+    await handler.set("/about", page(["t"]), {});
+    await new Promise((r) => setTimeout(r, 2));
+    await handler.revalidateTag("t");
+    expect(await handler.get("/about", { kind: "APP_PAGE" })).toBeNull();
     expect(fake.count("unlink")).toBe(0);
   });
 

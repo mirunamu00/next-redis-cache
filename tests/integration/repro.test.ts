@@ -261,14 +261,56 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
     });
   });
 
-  describe("binary format on the wire", () => {
-    it("stores raw bytes: a 100 KiB body costs about 100 KiB, not 133 KiB of base64", async () => {
+  describe("optional tag state TTL (HEXPIRE, Redis >= 7.4)", () => {
+    it("tagStateTtlSeconds puts a TTL on the written fields, counted from the latest recorded time; invalidation works either way", async () => {
       const ns = uniqueNamespace();
-      const { handler } = legacyHandler({ client: client as never, namespace: ns });
+      const warn: string[] = [];
+      const { handler } = legacyHandler({ client: client as never, namespace: ns, tagStateTtlSeconds: 3600, logger: { warn: (m) => warn.push(String(m)) } });
+      await handler.set("/p", appPageValue("<p>x</p>", ["t"]), {});
+      await tick();
+      await handler.revalidateTag("t", { expire: 600 });
+      expect((await handler.get("/p", { kind: "APP_PAGE" }))?.lastModified).toBe(-1);
+      const key = `${ns}:_tagstate`;
+      if (version === "7.2") {
+        expect(warn.some((w) => w.includes("HEXPIRE"))).toBe(true);
+        await handler.revalidateTag("u");
+        expect(warn.filter((w) => w.includes("HEXPIRE"))).toHaveLength(1);
+      } else {
+        const [stale, expired] = (await client.sendCommand(["HTTL", key, "FIELDS", "2", "s:t", "x:t"])) as number[];
+        expect(stale).toBeGreaterThan(3600 + 590);
+        expect(stale).toBeLessThanOrEqual(3600 + 600);
+        expect(expired).toBe(stale);
+        expect(warn).toEqual([]);
+      }
+      expect(await client.pTTL(key)).toBe(-1);
+    });
+  });
+
+  describe("binary format on the wire", () => {
+    it("stores raw bytes: a 100 KiB body costs about 100 KiB, not 133 KiB of base64 (compression none)", async () => {
+      const ns = uniqueNamespace();
+      const { handler } = legacyHandler({ client: client as never, namespace: ns, compression: "none" });
       const body = Buffer.alloc(100 * 1024, 1);
       await handler.set("/bin", { kind: "APP_ROUTE", body, status: 200, headers: {} }, {});
       expect(await client.strLen(entryKey(ns, "b1", "/bin"))).toBeLessThan(body.byteLength + 512);
       expect((await handler.get("/bin", { kind: "APP_ROUTE" }))?.value.body.equals(body)).toBe(true);
+    });
+
+    it("[A9] compressed entries are much smaller, and entries of every setting stay readable by every setting", async () => {
+      const ns = uniqueNamespace();
+      const html = Array.from({ length: 4000 }, (_, i) => `<p class="doc">paragraph ${i % 97} of the page</p>`).join("");
+      const sizes: Record<string, number> = {};
+      for (const compression of ["none", "gzip", "brotli"] as const) {
+        const { handler } = legacyHandler({ client: client as never, namespace: ns, compression });
+        await handler.set(`/${compression}`, appPageValue(html), {});
+        sizes[compression] = await client.strLen(entryKey(ns, "b1", `/${compression}`));
+      }
+      expect(sizes.gzip!).toBeLessThan(sizes.none! / 2);
+      expect(sizes.brotli!).toBeLessThan(sizes.none! / 2);
+      for (const reader of ["none", "gzip", "brotli"] as const) {
+        const { handler } = legacyHandler({ client: client as never, namespace: ns, compression: reader });
+        for (const written of ["none", "gzip", "brotli"]) expect((await handler.get(`/${written}`, { kind: "APP_PAGE" }))?.value.html).toBe(html);
+      }
     });
   });
 });

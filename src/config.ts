@@ -11,6 +11,8 @@ export const DEFAULT_WRITE_MS = 2000;
 export const DEFAULT_OPEN_MS = 10_000;
 export const DEFAULT_STATIC_SECONDS = 30 * 24 * 3600;
 export const DEFAULT_MAX_SECONDS = 365 * 24 * 3600;
+/** Chosen after the P6 measurements (ROADMAP.md D42): -86% memory for a static site, no latency cost. */
+export const DEFAULT_COMPRESSION: Compression = "brotli";
 
 export interface ResolvedConfig {
   client: ClientSource;
@@ -26,8 +28,10 @@ export interface ResolvedConfig {
   staticSeconds: number;
   maxSeconds: number;
   estimateExpire: (revalidateSeconds: number) => number;
-  onTagExpired: "stale" | "miss";
+  onTagExpired: "auto" | "stale" | "miss";
   compression: Compression;
+  /** 0 = tag state fields without TTL (default). */
+  tagStateTtlSeconds: number;
   logger: ResolvedLogger;
   emit: (event: CacheEvent) => void;
   isDisabled: () => boolean;
@@ -82,13 +86,13 @@ export function resolveConfig(config: RedisCacheConfig): ResolvedConfig {
   const isDisabled =
     typeof disabled === "function" ? () => Boolean(disabled()) : disabled === undefined ? isBuildPhase : () => disabled;
   const fallback = config.fallback === false ? { buildOutput: false, reseed: false } : (config.fallback ?? {});
-  const compression = config.compression ?? "none";
+  const compression = config.compression ?? DEFAULT_COMPRESSION;
   if (!["none", "gzip", "brotli"].includes(compression)) {
     throw new TypeError(`[next-redis-cache] compression must be "none", "gzip" or "brotli", got ${JSON.stringify(compression)}`);
   }
-  const onTagExpired = config.onTagExpired ?? "stale";
-  if (onTagExpired !== "stale" && onTagExpired !== "miss") {
-    throw new TypeError(`[next-redis-cache] onTagExpired must be "stale" or "miss", got ${JSON.stringify(onTagExpired)}`);
+  const onTagExpired = config.onTagExpired ?? "auto";
+  if (onTagExpired !== "auto" && onTagExpired !== "stale" && onTagExpired !== "miss") {
+    throw new TypeError(`[next-redis-cache] onTagExpired must be "auto", "stale" or "miss", got ${JSON.stringify(onTagExpired)}`);
   }
   const estimate = config.ttl?.estimateExpire;
   return {
@@ -105,6 +109,7 @@ export function resolveConfig(config: RedisCacheConfig): ResolvedConfig {
     estimateExpire: estimate ?? ((s: number) => Math.floor(s * 1.5)),
     onTagExpired,
     compression,
+    tagStateTtlSeconds: config.tagStateTtlSeconds === undefined ? 0 : positive("tagStateTtlSeconds", config.tagStateTtlSeconds, 0),
     logger,
     emit,
     isDisabled,

@@ -18,3 +18,4 @@ While preparing a release (the working tree version is still the previous one), 
 |---|---|---|---|---|
 | `1.0.6.json` | 3 commands | 8 commands | 123 keys, 116,060,896 B | Initial baseline |
 | `1.1.0.json` | 3 commands | 8 commands | 178 keys, 149,519,924 B (+28.8%) | 7-4 prewarm fix: entries 1.0.6 used to miss are now stored - 129 page segments (`/<page>/__PAGE__`) +29.8 MB (243 in 1.0.6, 372 in 1.1.0), 52 APP_ROUTE entries (OG images, icon) +0.77 MB, and `/index`, `/_not-found`, `/_global-error`. Commands per request and the key format are unchanged |
+| `2.0.0-next.0.json` | 2 commands | 6 commands | 176 keys, 17,424,668 B (-88.3% vs 1.1.0) | 2.0 core: one GET + one HMGET per hit (no HEXISTS orphan check), binary envelope (no base64), brotli compression by default (P6, D42). Measured with `--compression none`: 122,499,790 B (-18%), `gzip`: 20,538,062 B (-86%); latency p50/p99 unchanged across the three (legacy 41-39 / 66-59 ms, use-cache 32-34 / 51-56 ms) |

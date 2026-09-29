@@ -67,20 +67,24 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
   // 7-15: at a start the previous build's keys get the TTL cap (EXPIRE, which counts as an access); when
   // the next build starts soon after, that build looks recently used and is deferred - it must still go
   // away once idle, without waiting for another deployment or the one-day TTL cap
-  it.fails("[7-15] a build deferred because of the TTL cap of the start before is removed by a later pass", async () => {
+  it("[7-15] a build deferred because of the TTL cap of the start before is removed by a later pass", async () => {
     const ns = uniqueNamespace();
     await cleanupOldBuilds(client as never, { namespace: ns, buildId: "A" });
     await client.set(`${ns}:A:e:/page`, "x", { expiration: { type: "EX", value: 7 * 24 * 3600 } });
     await new Promise((r) => setTimeout(r, 2100)); // A idle for 2 s
     await cleanupOldBuilds(client as never, { namespace: ns, buildId: "B", minIdleSeconds: 2 }); // A = previous: TTL capped
     expect(await client.ttl(`${ns}:A:e:/page`)).toBeLessThanOrEqual(24 * 3600);
-    const { done } = startCacheMaintenance({
+    const { done, stop } = startCacheMaintenance({
       config: { client: client as never, namespace: ns, buildId: "C", disabled: false, logger: false },
       cleanup: { minIdleSeconds: 2 },
     });
-    expect((await done).cleanup).toMatchObject({ gaveUp: false, value: { deferredBuilds: ["A"] } });
-    await waitFor(async () => (await client.exists(`${ns}:A:e:/page`)) === 0, { timeout: 6000, message: "A removed without a restart" });
-    expect(await client.zRange(`${ns}:_builds`, 0, -1)).toEqual(["B", "C"]);
+    try {
+      expect((await done).cleanup).toMatchObject({ gaveUp: false, value: { deferredBuilds: ["A"] } });
+      await waitFor(async () => (await client.exists(`${ns}:A:e:/page`)) === 0, { timeout: 6000, message: "A removed without a restart" });
+      expect(await client.zRange(`${ns}:_builds`, 0, -1)).toEqual(["B", "C"]);
+    } finally {
+      stop();
+    }
   });
 
   it("[7-9] 10k keys of an old build go in UNLINK batches of at most 500", async () => {

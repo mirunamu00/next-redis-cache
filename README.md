@@ -156,6 +156,8 @@ In the repository's measurements one static-site build (176 entries) takes 17.4 
 2. deletes any other build only when **all** of its keys have been idle (`OBJECT IDLETIME`) for `minIdleSeconds` (30 min) - instances of the old build still serving during a rolling update keep reading their keys, so they are kept until the rollout is over. Keys whose idle time cannot be read (LFU eviction policy) count as in use;
 3. caps the TTL of kept previous builds and of builds kept by rule 2 at `retiredTtlSeconds` (1 day).
 
+A build kept by rule 2 is checked again by the same instance `minIdleSeconds` (+1 s) later, up to `rechecks` (3) times while builds stay deferred, so it is removed once nobody reads it - without waiting for the next deployment. Redis counts the EXPIRE of rule 3 as an access, so a build capped as the previous one looks used for `minIdleSeconds` when the next build starts soon after; the recheck covers that too, and the TTL cap stays as the safety net.
+
 It waits for Redis to be ready, retries with backoff, never rejects and logs one line per run. Keys written by 1.x in the same namespace (`{namespace}:{build}:{key}` and the 1.x tag hashes) are removed by the same rules.
 
 ## Configuration
@@ -201,10 +203,10 @@ Returns `null` without a URL. `closeSharedClients()` destroys the shared clients
 
 | Option | Default | Description |
 | --- | --- | --- |
-| `cleanup` | `{}` (on) | `{ keepPrevious = 1, minIdleSeconds = 1800, retiredTtlSeconds = 86400, attempts = 10, baseDelayMs = 2000, maxDelayMs = 300000 }`, or `false` |
+| `cleanup` | `{}` (on) | `{ keepPrevious = 1, minIdleSeconds = 1800, retiredTtlSeconds = 86400, rechecks = 3, attempts = 10, baseDelayMs = 2000, maxDelayMs = 300000 }`, or `false` |
 | `prewarm` | `false` | `true` or `{ concurrency = 8, distDir }`: write every prerendered route into Redis |
 
-Returns `{ done }`, a promise of the results; it never rejects.
+Returns `{ done, stop }`: `done` is a promise of the first run's results and never rejects; `stop()` cancels pending rechecks (their timers never keep the process alive).
 
 ## API
 

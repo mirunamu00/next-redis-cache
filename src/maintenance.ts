@@ -14,6 +14,12 @@
  * Owners starting with "_" are reserved (`_tagstate`, `_builds`) and never touched - except the tag hash
  * names 1.x used, which 2.x does not read.
  * Deletion uses UNLINK in batches; nothing is collected beyond one owner's key list.
+ *
+ * A build deferred by rule 2 is looked at again by the same process (startCacheMaintenance `rechecks`,
+ * 7-15): a pass without registering, `minIdleSeconds` + 1 s after the previous one, while builds are
+ * deferred. Rule 3's EXPIRE counts as an access in Redis (it refreshes OBJECT IDLETIME), so a build capped
+ * as "previous" at one start looks used when the next build starts soon after; the recheck removes it
+ * once nobody has read it for `minIdleSeconds`, instead of leaving it to the TTL cap.
  */
 import { buildIdResolver, resolveConfig } from "./config";
 import { escapeGlob, ownerOf, registryKey } from "./keys";
@@ -26,6 +32,7 @@ export const DEFAULT_KEEP_PREVIOUS = 1;
 export const DEFAULT_MIN_IDLE_SECONDS = 30 * 60;
 export const DEFAULT_RETIRED_TTL_SECONDS = 24 * 60 * 60;
 export const DEFAULT_ATTEMPTS = 10;
+export const DEFAULT_RECHECKS = 3;
 
 /** Tag hash names of 1.x (defaults and the README's): unused by 2.x, so they are cleaned like old builds. */
 const V1_TAG_HASHES = new Set(["__sharedTags__", "__sharedTagsTtl__", "__revalidated_tags__", "_tags", "_tagTtls", "_revalidated"]);
@@ -64,7 +71,16 @@ export interface CleanupResult {
  * Registers `buildId` and removes the keys of old builds (rules above). Rejects on Redis errors; use
  * startCacheMaintenance for a background run with retries that never rejects.
  */
-export async function cleanupOldBuilds(client: AnyRedisClient, options: CleanupOptions): Promise<CleanupResult> {
+export function cleanupOldBuilds(client: AnyRedisClient, options: CleanupOptions): Promise<CleanupResult> {
+  return cleanupPass(client, options, true);
+}
+
+/**
+ * One cleanup pass. `register: false` (rechecks) leaves the registry alone and keeps the newest
+ * registered build with its `keepPrevious` predecessors besides `buildId`: an older instance's recheck
+ * never removes the previous build of a later deployment.
+ */
+async function cleanupPass(client: AnyRedisClient, options: CleanupOptions, register: boolean): Promise<CleanupResult> {
   const {
     namespace,
     buildId,
@@ -78,11 +94,14 @@ export async function cleanupOldBuilds(client: AnyRedisClient, options: CleanupO
   const t = <T>(p: Promise<T>) => withTimeout(p, timeoutMs);
   const registry = registryKey(namespace);
 
-  await t(client.zAdd(registry, { score: now, value: buildId }));
+  if (register) await t(client.zAdd(registry, { score: now, value: buildId }));
   // ascending by start time -> most recent first
   const registered = ((await t(client.zRange(registry, 0, -1))) as unknown[]).map(String).reverse();
-  const previous = registered.filter((id) => id !== buildId).slice(0, Math.max(0, keepPrevious));
-  const keep = new Set([buildId, ...previous]);
+  const newest = registered[0] ?? buildId;
+  // this build, the newest one (normally the same) and the builds started right before the newest one
+  const keep = new Set([buildId, newest, ...registered.filter((id) => id !== newest).slice(0, Math.max(0, keepPrevious))]);
+  // TTL cap: every kept build except this one and the newest
+  const previous = [...keep].filter((id) => id !== buildId && id !== newest);
 
   const byOwner = new Map<string, string[]>();
   const match = `${escapeGlob(namespace)}:*`;
@@ -248,7 +267,14 @@ export interface MaintenanceOptions {
   config: RedisCacheConfig;
   /** Old-build cleanup (default on); `false` disables it. */
   cleanup?:
-    | (Pick<CleanupOptions, "keepPrevious" | "minIdleSeconds" | "retiredTtlSeconds" | "batchSize" | "timeoutMs"> & RetryOptions)
+    | (Pick<CleanupOptions, "keepPrevious" | "minIdleSeconds" | "retiredTtlSeconds" | "batchSize" | "timeoutMs"> &
+        RetryOptions & {
+          /**
+           * Further passes while builds are deferred (default 3, 0 = none): each one `minIdleSeconds` + 1 s
+           * after the previous pass, on an unref'd timer, without registering the build again.
+           */
+          rechecks?: number;
+        })
     | false;
   /** Prewarm Redis from the build output (default false: the build-output fallback re-seeds on demand). */
   prewarm?: boolean | ({ concurrency?: number; distDir?: string } & RetryOptions);
@@ -266,9 +292,9 @@ function describeGiveUp(what: string, g: GiveUp): string {
   return `${what} gave up after ${g.attempts} attempts: ${why}; it runs again at the next start`;
 }
 
-function describeCleanup(r: CleanupResult, buildId: string): string {
+function describeCleanup(r: CleanupResult, buildId: string, label = "cleanup"): string {
   const kept = r.kept.map((id) => (id === buildId ? `${id} (current)` : `${id} (previous)`)).join(", ");
-  const parts = [`cleanup: deleted ${r.deleted} keys`];
+  const parts = [`${label}: deleted ${r.deleted} keys`];
   if (r.removedBuilds.length > 0) parts.push(`removed builds ${r.removedBuilds.join(", ")}`);
   parts.push(`kept ${kept}`);
   if (r.deferredBuilds.length > 0) parts.push(`deferred (recently used) ${r.deferredBuilds.join(", ")}`);
@@ -279,7 +305,8 @@ function describeCleanup(r: CleanupResult, buildId: string): string {
 /**
  * Starts background maintenance from `instrumentation.ts` (register): old-build cleanup and, optionally,
  * prewarming. Never awaited by the caller and never rejects: it waits for Redis to be ready, retries with
- * backoff and logs one line per task. `done` resolves with the results (tests, logging).
+ * backoff and logs one line per task. `done` resolves with the results of the first run (tests, logging);
+ * rechecks of deferred builds follow on unref'd timers, `stop()` cancels them.
  *
  * ```ts
  * // instrumentation.ts (Node runtime)
@@ -287,7 +314,9 @@ function describeCleanup(r: CleanupResult, buildId: string): string {
  * startCacheMaintenance({ config }); // cleanup on, prewarm off
  * ```
  */
-export function startCacheMaintenance(options: MaintenanceOptions): { done: Promise<MaintenanceResult> } {
+export function startCacheMaintenance(options: MaintenanceOptions): { done: Promise<MaintenanceResult>; stop(): void } {
+  let stopped = false;
+  let recheckTimer: ReturnType<typeof setTimeout> | undefined;
   const done = (async (): Promise<MaintenanceResult> => {
     const cfg = resolveConfig(options.config);
     if (cfg.isDisabled()) return { skipped: "disabled" };
@@ -299,12 +328,36 @@ export function startCacheMaintenance(options: MaintenanceOptions): { done: Prom
 
     const cleanup = options.cleanup ?? {};
     if (cleanup !== false) {
+      const pass: CleanupOptions = { ...cleanup, namespace: cfg.namespace, buildId };
+      const rechecks = Math.max(0, Math.floor(cleanup.rechecks ?? DEFAULT_RECHECKS)) || 0;
+      const recheckMs = ((cleanup.minIdleSeconds ?? DEFAULT_MIN_IDLE_SECONDS) + 1) * 1000;
+      const scheduleRecheck = (n: number) => {
+        if (stopped || n > rechecks) return;
+        recheckTimer = setTimeout(() => void recheck(n), recheckMs);
+        (recheckTimer as { unref?: () => void }).unref?.();
+      };
+      const recheck = async (n: number) => {
+        if (stopped) return;
+        const label = `cleanup recheck ${n} of ${rechecks}`;
+        let deferred = true; // not ready or failed: try again at the next recheck
+        if (client.isReady) {
+          try {
+            const r = await cleanupPass(client, pass, false);
+            deferred = r.deferredBuilds.length > 0;
+            cfg.logger.info(describeCleanup(r, buildId, label));
+          } catch (err) {
+            cfg.logger.warn(`${label} failed: ${describeError(err)}`);
+          }
+        }
+        if (deferred) scheduleRecheck(n + 1);
+      };
       if (!client.isReady) cfg.logger.info("cleanup: waiting for Redis");
       tasks.push(
-        whenReady(client, () => cleanupOldBuilds(client, { ...cleanup, namespace: cfg.namespace, buildId }), cleanup).then((r) => {
+        whenReady(client, () => cleanupPass(client, pass, true), cleanup).then((r) => {
           result.cleanup = r;
-          if (r.gaveUp) cfg.logger.warn(describeGiveUp("cleanup", r));
-          else cfg.logger.info(describeCleanup(r.value, buildId));
+          if (r.gaveUp) return cfg.logger.warn(describeGiveUp("cleanup", r));
+          cfg.logger.info(describeCleanup(r.value, buildId));
+          if (r.value.deferredBuilds.length > 0) scheduleRecheck(1);
         }),
       );
     }
@@ -334,5 +387,11 @@ export function startCacheMaintenance(options: MaintenanceOptions): { done: Prom
     console.warn(`[next-redis-cache] maintenance failed: ${describeError(err)}`);
     return {};
   });
-  return { done };
+  return {
+    done,
+    stop() {
+      stopped = true;
+      clearTimeout(recheckTimer);
+    },
+  };
 }

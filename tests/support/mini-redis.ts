@@ -252,6 +252,11 @@ export async function startMiniRedis({ port: fixedPort = 0, password }: MiniRedi
         const stop = Number(a[2]);
         return sorted.slice(start, stop < 0 ? sorted.length + stop + 1 : stop + 1);
       }
+      case "ZSCORE": {
+        touch(a[0]!);
+        const score = exists(a[0]!) ? zsets.get(a[0]!)?.get(a[1]!) : undefined;
+        return score === undefined ? null : String(score);
+      }
       case "ZREM": {
         touch(a[0]!);
         const z = exists(a[0]!) ? zsets.get(a[0]!) : undefined;

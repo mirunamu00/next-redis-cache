@@ -87,7 +87,7 @@ describe("commands", () => {
     expect(await client.exists("h")).toBe(0);
   });
 
-  it("implements sorted set commands (ZADD, ZRANGE, ZREM)", async () => {
+  it("implements sorted set commands (ZADD, ZRANGE, ZSCORE, ZREM)", async () => {
     const { client } = await connect(mini.url);
     await client.zAdd("z", [
       { score: 3, value: "c" },
@@ -96,6 +96,8 @@ describe("commands", () => {
     ]);
     expect(await client.zRange("z", 0, -1)).toEqual(["a", "b", "c"]);
     expect(await client.zRange("z", 0, 0)).toEqual(["a"]);
+    expect(await client.zScore("z", "c")).toBe(3);
+    expect(await client.zScore("z", "nope")).toBeNull();
     expect(await client.zRem("z", "b")).toBe(1);
     expect(await client.zRange("z", 0, -1)).toEqual(["a", "c"]);
   });

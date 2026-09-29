@@ -1,0 +1,12 @@
+{
+  "name": "nrc-test-app-next-16-3",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Next.js 16.3 dependency set for the test apps (ROADMAP.md section 6.2). The package under test is installed separately from a tarball.",
+  "dependencies": {
+    "@redis/client": "5.12.1",
+    "next": "16.3.6",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  }
+}

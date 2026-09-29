@@ -1,0 +1,12 @@
+{
+  "name": "nrc-test-app-canary",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Next.js canary dependency set (nightly only, allowed to fail, no lockfile). The package under test is installed separately from a tarball.",
+  "dependencies": {
+    "@redis/client": "^5.12.1",
+    "next": "canary",
+    "react": "latest",
+    "react-dom": "latest"
+  }
+}

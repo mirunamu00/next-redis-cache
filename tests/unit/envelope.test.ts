@@ -79,7 +79,7 @@ describe("envelope", () => {
 
   // Found by the property test (a dictionary with the key "__proto__"): assigning out["__proto__"] sets the
   // prototype of the copy instead of an own property, so the key was lost on the way in and on the way out
-  it.fails("keeps an own \"__proto__\" key as data (and never as the prototype)", async () => {
+  it("keeps an own \"__proto__\" key as data (and never as the prototype)", async () => {
     const value = JSON.parse('{"a":1,"__proto__":{"polluted":true},"list":[{"__proto__":null}]}') as Record<string, unknown>;
     const { value: out } = (await decodeEnvelope(await encodeEnvelope({}, value))) as { value: Record<string, unknown> };
     expect(Object.getPrototypeOf(out)).toBe(Object.prototype);

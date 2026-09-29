@@ -6,7 +6,7 @@ import { decodeEnvelope, encodeEnvelope } from "../../src/envelope";
 
 const bytes = fc.uint8Array({ maxLength: 4096 }).map((a) => Buffer.from(a));
 const text = fc.oneof(fc.string({ maxLength: 40 }), fc.string({ minLength: 1000, maxLength: 3000 }));
-const key = fc.oneof(fc.string({ maxLength: 12 }), fc.constant("$nrc"));
+const key = fc.oneof(fc.string({ maxLength: 12 }), fc.constant("$nrc"), fc.constant("__proto__"));
 
 // JSON-like values plus Buffers and Maps, the shapes Next.js hands to the handlers
 const { value } = fc.letrec((tie) => ({

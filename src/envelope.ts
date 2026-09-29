@@ -42,6 +42,12 @@ export class EnvelopeFormatError extends Error {
 
 type Json = null | boolean | number | string | Json[] | { [k: string]: Json };
 
+/** out[key] = value as an own property: assigning "__proto__" would set the prototype instead. */
+function setOwn(out: Record<string, unknown>, key: string, value: unknown): void {
+  if (key === "__proto__") Object.defineProperty(out, key, { value, enumerable: true, writable: true, configurable: true });
+  else out[key] = value;
+}
+
 function pack(value: unknown, blobs: Buffer[]): Json {
   if (Buffer.isBuffer(value)) {
     blobs.push(value);
@@ -64,7 +70,7 @@ function pack(value: unknown, blobs: Buffer[]): Json {
     const out: { [k: string]: Json } = {};
     for (const [k, v] of Object.entries(value)) {
       if (v === undefined || typeof v === "function") continue;
-      out[k] = pack(v, blobs);
+      setOwn(out, k, pack(v, blobs));
     }
     return Object.prototype.hasOwnProperty.call(value, "$nrc") ? { $nrc: "o", v: out } : out;
   }
@@ -100,7 +106,7 @@ function unpack(value: Json, blobs: Buffer[]): unknown {
 
 function unpackObject(value: { [k: string]: Json }, blobs: Buffer[]): Record<string, unknown> {
   const out: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries(value)) out[k] = unpack(v, blobs);
+  for (const [k, v] of Object.entries(value)) setOwn(out, k, unpack(v, blobs));
   return out;
 }
 

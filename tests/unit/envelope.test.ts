@@ -77,6 +77,18 @@ describe("envelope", () => {
     await expect(decodeEnvelope(raw)).rejects.toBeInstanceOf(EnvelopeFormatError);
   });
 
+  // Found by the property test (a dictionary with the key "__proto__"): assigning out["__proto__"] sets the
+  // prototype of the copy instead of an own property, so the key was lost on the way in and on the way out
+  it.fails("keeps an own \"__proto__\" key as data (and never as the prototype)", async () => {
+    const value = JSON.parse('{"a":1,"__proto__":{"polluted":true},"list":[{"__proto__":null}]}') as Record<string, unknown>;
+    const { value: out } = (await decodeEnvelope(await encodeEnvelope({}, value))) as { value: Record<string, unknown> };
+    expect(Object.getPrototypeOf(out)).toBe(Object.prototype);
+    expect((out as { polluted?: boolean }).polluted).toBeUndefined();
+    expect(Object.keys(out)).toEqual(["a", "__proto__", "list"]);
+    expect(Object.getOwnPropertyDescriptor(out, "__proto__")?.value).toEqual({ polluted: true });
+    expect(out).toEqual(value);
+  });
+
   it("rejects a blob reference that is out of range", async () => {
     const meta = Buffer.from(JSON.stringify({ m: null, v: { $nrc: "b", i: 3 }, b: [] }));
     const len = Buffer.alloc(4);

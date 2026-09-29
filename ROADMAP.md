@@ -4,7 +4,7 @@ This document is the **source of truth** for hardening the package. Every work s
 It is not part of the npm package (`files` in `package.json` is `dist` only - enforced by `scripts/check-pack.mjs`).
 
 - Written: 2026-09-29 (1.0.6 audit -> plan -> test environment redesign, merged into one document)
-- Versions: 1.0.6 (published) -> 1.1.0 (hotfix, ready to publish - section 11) -> 2.0.0
+- Versions: 1.0.6 (published) -> 1.1.0 (hotfix, released from master - section 11) -> 2.0.0 (P2..P6 done on `feat/v2`, ready for `2.0.0-next.N` - section 12)
 - Reference consumer: the `mirunamu-cluster/docs` app (docs.mirunamu.info). **All verification happens in this repository's test environment**; docs only does rollout smoke tests.
 - Language: everything in this repository is English - code, comments, strings, test names, Markdown, commit messages (2026-09-29 user decision, see 6.1). The branch history was rewritten to English on 2026-09-29 (user decision, Q20).
 
@@ -109,12 +109,14 @@ It is not part of the npm package (`files` in `package.json` is `dist` only - en
 |---|---|---|---|
 | `{ns}:{build}:e:{cacheKey}` | String (binary envelope) | always | legacy entry |
 | `{ns}:{build}:u:{cacheKey}` | String (binary envelope) | always | use-cache entry |
-| `{ns}:_tagstate` | Hash tag -> `"{stale},{expired}"` (ms) | none (bounded by tag count); optional HEXPIRE on Redis >= 7.4 | tag state shared by both handlers |
+| `{ns}:_tagstate` | Hash, two fields per tag: `s:<tag>` stale, `x:<tag>` expired (ms) - planned: tag -> `"{stale},{expired}"` | none (bounded by tag count); optional per-field HEXPIRE on Redis >= 7.4 (`tagStateTtlSeconds`) | tag state shared by both handlers |
 | `{ns}:_builds` | ZSET | none | build registry |
 
 - **No tag -> key reverse index, lazy invalidation only** (same as Next's default handler) -> 7-5 solved structurally.
 - Tag state is **namespace-global** (a data invalidation must also apply to old-build pods).
 - Envelope: `[magic+ver][meta JSON length][meta JSON][blob...]` - Buffers and segment Maps without base64, optional gzip/brotli. Reads use `withTypeMapping({[RESP_TYPES.BLOB_STRING]: Buffer})`.
+- (as built, D21) Two hash fields per tag instead of one `"{stale},{expired}"` value: every update is one idempotent HSET that leaves the other field untouched, exactly like Next's partial updates (`{...existing, expired: now}`), without a read-modify-write.
+- (as built, `src/envelope.ts`) header `"NRC"` + format version (1) + flags (bits 0-1 compression) | body `uint32 meta length | meta JSON {m, v, b} | blobs`. Buffers/Uint8Arrays and strings >= 1 KiB are blobs (raw bytes, no base64, no JSON escaping); Maps are `{"$nrc":"m"}`; an object that has a `$nrc` key is wrapped. Compression (payload >= 1 KiB) covers the body: gzip, or brotli at quality 4 (D28). Unknown magic/version/corruption -> `EnvelopeFormatError` -> miss.
 
 ### 5.2 Semantics (Next 16)
 
@@ -125,6 +127,12 @@ It is not part of the npm package (`files` in `package.json` is `dist` only - en
 - Legacy `get`: with softTags, GET+HMGET pipelined -> HMGET for the remaining stored tags (at most 2 round trips). FETCH + expired -> null. APP_PAGE/APP_ROUTE/PAGES expired or stale -> `lastModified:-1` (SWR). Option `onTagExpired:"stale"|"miss"` (default stale). Remove the HEXISTS orphan check and the `lifespan.expireAt` check.
 - TTL: **from the write time**. Numeric revalidate -> `estimateExpire(revalidate)` (default x1.5), `false` -> `ttl.staticSeconds` (default 30 days), everything capped at `ttl.maxSeconds`. APP_ROUTE reads `ctx.cacheControl`.
 - `pendingSets` tracked per set with a token. No `tee` when storing to Redis.
+- **As built (P2..P6), differences from the plan above:**
+  - Implicit (soft) tags of a use-cache `get` use the use-cache wrapper's `getExpiration` rule (`timestamp <= max(expired)`, future `expired` included), not `areTagsExpired`/`areTagsStale` - that is what Next does with the default handler, and the oracle (fixed + random programs, with and without durations) agrees (D23). Entry tags use `areTagsExpired`/`areTagsStale` as-is.
+  - Legacy entries with an **expired** tag: `onTagExpired: "auto"` (new default, D43) answers a miss (Next renders before answering, like its own FileSystemCache) except for a prerendered path of a `dynamicParams = false` route (prerender-manifest `dynamicRoutes[srcRoute].fallback === false`), where a miss is a 404 and `lastModified: -1` is returned; without a manifest it behaves like `"stale"`. `"stale"` / `"miss"` force one answer. **Stale** tags (profiles) always return `lastModified: -1`. Found by the nightly e2e matrix: Next 16.1 serves a `-1` entry once and regenerates in the background (`STALE`), Next 16.3 treats `-1` as "expired, regenerate before answering" (`REVALIDATED`, response-cache comment), so `updateTag` was not read-your-own-writes on 16.1 with `-1`.
+  - FETCH with a stale tag also returns `lastModified: -1` (Next computes `isStale` from the age).
+  - A legacy entry stores the time of the miss / stale answer that triggered its render as `lastModified` (the render start), not the time of `set` (D22): an invalidation that lands during a slow render leaves the result stale (C13, 7-6). The mark lives 5 min per key (10k keys max), the earliest pending miss wins; time-stale hits (stored `revalidate` elapsed) are marked too.
+  - The HEXISTS orphan check and `lifespan` are gone; the second round trip (entry tags) is skipped when the request already named them.
 
 ### 5.3 Connection, timeouts, circuit, logging
 
@@ -132,16 +140,21 @@ It is not part of the npm package (`files` in `package.json` is `dist` only - en
 - `client` is an instance or `() => client|null`. The package never awaits `connect()`. `./redis` provides `connectRedis(url,{waitMs=1000})` (returns the client late at the latest, logs disconnect/recover transitions). One shared client via a globalThis symbol.
 - `logger` option (default console warn/error, debug with `NEXT_PRIVATE_DEBUG_CACHE`), logging only on transitions + periodic summaries. `onEvent` hook (hit/miss/stale/fallback/reseed/error/circuit).
 - Default `disabled` = `NEXT_PHASE === "phase-production-build"` -> built-in no-op.
+- **As built:** the client's own command `timeout` option only covers the time before a command is written to the socket (`commands-queue.js` removes it from `toWrite`), so the package bounds the whole round trip with its own race (cleared timer) and does not use the option (D24). The circuit breaker is keyed by the client object (WeakMap), shared by every handler using that client; only timeouts open it, command errors (WRONGTYPE, OOM) do not (D25). A client function is awaited at most 3 s per call (`CLIENT_RESOLVE_MS`); the first client it returns is kept, `null` is asked again next time and logged once as info (D26). `reportFailure` does not treat `no-client`/`disabled` as failures. The default logger looks console methods up per call (log shippers that patch console after startup, and test spies, see the lines).
 
 ### 5.4 Build-output (disk) fallback
 
 - APP_PAGE and APP_ROUTE, when `!dev && !disabled && serverDistDir`. Uses Next's `FileSystemCache` read-only (`flushToDisk:false`, `maxMemoryCacheSize:0`) - follows the Next version's format automatically. The internal path dependency is guarded by a dynamic import + matrix contract tests.
 - Disk entries are also checked against tag state: stale -> `lastModified:-1`, fresh -> NX re-seed (revalidate from prerender-manifest, `/` -> `/index`).
 - Prewarm is rewritten on the same path (7-4 solved structurally). With fallback + re-seed, prewarm is optional and off by default.
+- **As built (`src/build-output.ts`):** `FileSystemCache` is loaded with a variable specifier through `import()` (ESM gets `module.exports` as `default`, CJS gets the class; both handled), constructed with `{ fs: ctx.fs ?? node fs, serverDistDir, flushToDisk: false, maxMemoryCacheSize: 0 }`; if it cannot be loaded the fallback is off with one warning. States: `fresh` (served with the file mtime, re-seeded NX in the background, once per key in flight, revalidate from the manifest, only prerendered routes), invalidated (answered like an expired/stale Redis entry), `unknown` (Redis unusable: served as it is, no re-seed). Only for `ctx.kind` APP_PAGE/APP_ROUTE, not in dev, not while disabled. Prewarm (`prewarmFromBuildOutput`) reads through the same class with `isRoutePPREnabled = meta.postponed != null` (D40), SET NX with the file mtime as lastModified; returns `{prewarmed, skipped, failed, unavailable?}`. The matrix contract is `tests/contract/runtime/fallback.contract.mjs`, run by `contract-types.mjs` inside each variant's install (16.1 and 16.3 pass).
+- Next bundles `instrumentation.ts` at build time, including the package's `./instrumentation` entry: a new package version needs a new app build for maintenance changes (`prepare-app --hot-dist` only refreshes the runtime-loaded handlers).
 
 ### 5.5 Old-build cleanup
 
 Port of the docs `build-keys.mjs` algorithm: registry ZSET, keep the current + N previous builds, delete others with batched UNLINK only when every key has `OBJECT IDLETIME >= minIdleSeconds`, cap the TTL of held and previous builds, `cleanupWhenReady` (wait for ready + exponential backoff). `_*` owners excluded. v1 `cleanupOldBuildKeys` stays (fixed) and is deprecated in 2.x, removed in 3.0.
+
+As built (`src/maintenance.ts`): `cleanupOldBuilds(client, opts)` (rejects on Redis errors), `whenReady(client, task, retry)` (the docs `cleanupWhenReady`, generic; never rejects; `{gaveUp:false, attempts, value}` or `{gaveUp:true, attempts, cause: "disconnected"|"error", error}`), `startCacheMaintenance({config, cleanup, prewarm})` (resolves the client from the config, `{skipped: "disabled"|"no-client"}` otherwise, runs cleanup and prewarm through `whenReady`, one log line each, never rejects). Reserved owners are `_*` **except** the 1.x tag hash names (`__sharedTags__`, `__sharedTagsTtl__`, `__revalidated_tags__`, `_tags`, `_tagTtls`, `_revalidated`), which 2.x never reads and cleans like old builds (D44). SCAN MATCH escapes glob characters of the namespace.
 
 ### 5.6 Public API draft
 
@@ -176,6 +189,14 @@ export function prewarmFromBuildOutput(config: RedisCacheConfig, o?: { concurren
 /** @deprecated */ export function cleanupOldBuildKeys(...): ...;
 ```
 
+**As built (2.0.0-next), differences from the draft:**
+
+- `RedisCacheConfig` adds `tagStateTtlSeconds?: number` (P6, HEXPIRE); `onTagExpired` is `"auto" | "stale" | "miss"`, default `"auto"` (D43); `compression` default is `"brotli"` (D42). `buildId` default also reads `<distDir>/BUILD_ID` via `ctx.serverDistDir`, else `<cwd>/.next/BUILD_ID`, else `"default"` with one warning.
+- `createCacheHandler` returns `LegacyCacheHandlerClass` = `new (ctx?: LegacyHandlerContext) => LegacyCacheHandlerInstance`; the types avoid index signatures so Next's `CacheHandlerContext` class type accepts it (7-8, contract-types).
+- `./redis` also exports `closeSharedClients()`; `connectRedis` options add `shared` (default true).
+- `./instrumentation` also exports `whenReady(client, task, retry)` and the result types; `startCacheMaintenance` retry options (`attempts`, `baseDelayMs`, `maxDelayMs`) sit inside `cleanup` / `prewarm`; `prewarm` also takes `distDir`; `MaintenanceResult` is `{ skipped?, cleanup?: Attempted<CleanupResult>, prewarm?: Attempted<PrewarmResult> }`.
+- `registerInitialCache` and the static `LegacyCacheHandler` (named and default export) are removed (D27). The default export of `.` is gone.
+
 ### 5.7 docs wrapper (P5)
 
 | docs code | Handling |
@@ -189,7 +210,7 @@ export function prewarmFromBuildOutput(config: RedisCacheConfig, o?: { concurren
 | use-cache no-op (`use-cache-handler.mjs`) | absorbed |
 | `tests/unit/*`, `mini-redis.mjs` | ported to the package (P0), deleted from docs together with the wrapper |
 
-docs end state: `cache/config.mjs` (namespace, BUILD_ID, `connectRedis`, `CACHE_NAMESPACE` override) + 3 lines per handler file + the instrumentation banner and `startCacheMaintenance({prewarm:false})`. Exact version pin during prereleases (`2.0.0-next.N`), `^2.0.0` after the stable release.
+docs end state: `cache/config.mjs` (namespace, BUILD_ID, `connectRedis`, `CACHE_NAMESPACE` override) + 3 lines per handler file + the instrumentation banner and `startCacheMaintenance({prewarm:false})`. Exact version pin during prereleases (`2.0.0-next.N`), `^2.0.0` after the stable release. The exact files are in section 12.3.
 
 ---
 
@@ -231,6 +252,7 @@ next-redis-cache/
 ```
 
 - Changes vs. plan: there is no `ci-matrix.mjs` - the matrix is computed inside ci.yml with `fromJSON(inputs.level == 'full' && ... || ...)`. `tests/perf/scenarios/` does not exist; the two scenarios live in `scripts/perf.mjs`.
+- Added in 2.0 (P2..P6): `src/{config,keys,logger,runner,envelope,tag-state,tag-writer,ttl,build-output,prewarm,maintenance,legacy-cleanup,redis,redis-entry}.ts` (1.x `buffer-utils`, `error-reporter`, `redis-client`, `tag-manager` removed); `tests/support/fake-redis.ts` (in-memory client for unit tests); `tests/fault/maintenance.test.ts`; `tests/integration/{prewarm,maintenance}.test.ts`; `tests/chaos/{degraded,persistence,pressure}.test.ts`; `tests/contract/runtime/fallback.contract.mjs`; `scripts/lib/readme-blocks.mjs`; `MIGRATION.md`. e2e `repro.spec.ts` files are now `regressions.spec.ts` (no expected failures left).
 
 - No npm workspaces (per-app Next version conflicts, symlink problems). Test apps are independent npm projects assembled by root scripts.
 - Publish isolation: `files:["dist"]` + `check-pack.mjs` compares the `npm pack --dry-run --json` list with a whitelist of `dist/**`, `README.md`, `LICENSE`, `package.json` (PR gate). Files referenced by exports, main, module or types that are missing also fail.
@@ -267,6 +289,7 @@ Observability (only with `TEST_HOOKS=1`): every response carries `data-build`, `
   - Test hook paths are `/api/nrc-test/stats` and `/api/nrc-test/unhandled` - folders starting with `_` such as `__test` are App Router private folders and do not become routes.
   - The `NRC_API=v1` adapters (`_shared/cache-handler.mjs`, `use-cache-handler.mjs`) use **the 1.0.x README Quick Start wiring as-is** (`await client.connect()` inside onCreation, top-level await for use-cache). Reproductions must see what real users see, so the wiring must be the documented one. Counters are added only by subclassing/wrapping. `NRC_API=v2` is filled in P2 (an explicit error for now).
   - instrumentation flags: `NRC_PREWARM=1` (README Step 4 `registerInitialCache`, awaited), `NRC_CLEANUP=1` (`cleanupOldBuildKeys` keepPrefix = own build, awaited). e2e defaults: prewarm on for static-site and full-legacy - on 1.0.6 `dynamicParams=false` pages 404 on an empty Redis (itself the A2 reproduction).
+  - 2.0 (P3, D29): `NRC_API` defaults to `v2` - `_shared/config.mjs` `v2Config()` is the 2.x README wiring (one config, `client: () => connectRedis(REDIS_URL)`), used by both handlers and the instrumentation; `v1` needs a 1.x package (`--pkg npm:1.1.0 --api v1`, baselines). v2 flags: `NRC_PREWARM=1` awaits `prewarmFromBuildOutput(config)` (so tests start warm), `NRC_CLEANUP=1` starts `startCacheMaintenance` in the background (`NRC_CLEANUP_MIN_IDLE`), tuning `NRC_READ_MS`, `NRC_WRITE_MS`, `NRC_OPEN_MS`, `NRC_FALLBACK=0`, `NRC_RESEED=0`, `NRC_COMPRESSION`, `NRC_TAG_CACHE_MS`, `NRC_CONNECT_WAIT_MS`, `TEST_CLOCK_OFFSET_MS` (C14). `/api/nrc-test/stats` adds `events` (onEvent counts, `fallback:<state>`, `miss:<reason>`, `circuit:<state>`) and `maintenance` (prewarm / cleanup results).
   - Marker: with TEST_HOOKS=1, `<div id="nrc-test" data-build data-render-id data-rendered-at data-instance>`. With cacheComponents `Date.now()`/`randomUUID()` cannot be used outside a cache scope, so full-cc puts the marker inside a `"use cache"` component (= when the cache entry was created).
   - static-site body text is 100..250 KB per page (HTML is about 2x because of the inlined RSC -> 200..500 KB). 200..500 KB of text at first made HTML up to 1 MB and one build ~200 MB in Redis - too heavy for local iteration.
   - full-cc: short-lived caches (`short`, expire 10 s < 5 min) and `"use cache: remote"` drop out of the static shell, so they sit inside `<Suspense>`. Cached components in the PPR shell do not fetch the origin (in-flight fetches when the prerender stops at a dynamic hole were reported as "Filling a cache during prerender timed out"). `/dyn/[id]` (use-cache lookup on every request) was added for chaos and perf.
@@ -291,6 +314,7 @@ Observability (only with `TEST_HOOKS=1`): every response carries `data-build`, `
   - The mini-redis TS port stores values binary-safe (Buffer), adds `AUTH` (password option), `PTTL`, `SET PX`, `DBSIZE`, `HGETALL`, `FLUSHDB`, plus `connectionCount()` and `getBuffer()`. It speaks RESP2 only (no `HELLO`).
 - **Multiple instances and rolling updates** (`scripts/fleet.mjs`, P0c): two builds with BUILD_ID A/B, 2..3 instances (get-port, `INSTANCE_ID`, shared Redis through toxiproxy), built-in round-robin LB, rolling A->B (`maxSurge 1, maxUnavailable 0`) and rollback B->A, shutdown with tree-kill.
   - Implementation (vs. plan): no get-port/tree-kill dependencies - ports come from `listen(0)`, and `node server.js` is spawned directly without a shell, so killing the child is enough (SIGTERM, SIGKILL after 5 s). Readiness = `/api/nrc-test/stats` 200 (default 120 s). The LB adds `x-nrc-upstream` to responses. Instances that exit on their own are listed in `fleet.crashed` (I2). `stop()` removes the namespace's keys with SCAN+UNLINK (kept with `NRC_KEEP_KEYS=1`) - without it the local Redis reached 1.5 GB after a few e2e runs. Instance logs go to `.work/logs/<app>@<variant>/<ns>/<id>.log`.
+  - P3 (D30): the LB counts in-flight requests per instance; `rolling()` and `stopInstance()` stop routing, wait for them (<= 10 s), then stop the process (endpoint removal + graceful termination). Without it, once 2.x removed the 404s, C11/C12 showed harness-made 502s for requests killed mid-flight.
 - **Windows**: all scripts are Node, `.gitattributes` eol=lf, short `.work` path, testcontainers over the Docker Desktop npipe. **GitHub Windows runners cannot run Linux containers** -> Windows CI runs only the layers that need no Docker.
 
 ### 6.5 Test layers
@@ -309,6 +333,8 @@ Observability (only with `TEST_HOOKS=1`): every response carries `data-build`, `
 | mutation | Stryker (vitest runner) | quality of the core module tests | <60m | weekly |
 
 **chaos**: C1 Redis absent at startup, C2 killed under traffic, C3 unresponsive, C4 latency 300 ms + jitter, C5 reset_peer, C6 FLUSHALL, C7 eviction pressure (16mb), C8 AOF restart (tag state rolls back), C9 wrong password, C10 WRONGTYPE, C11 rolling A->B, C12 rollback B->A, C13 invalidation during a slow render, C14 clock skew (`TEST_CLOCK_OFFSET_MS`).
+
+**All 14 exist since 2.0 (21 tests, all regular)**: `startup` C1, C9 · `outage` C2, C5 · `degraded` C3 (30 s downstream latency toxic = connection open, no replies; a dropping `timeout` toxic would desynchronize the RESP pipeline, D35), C4, C10 (`_tagstate` holds a string) · `data-loss` C6, C13 · `persistence` C8 (prodlike `docker compose restart`, graceful AOF) · `pressure` C7 (prodlike `CONFIG SET maxmemory 6mb` - one brotli build is ~17 MB, so 16mb no longer forces eviction), C14 (second instance 3 s behind) · `rolling` C11, C12 (+ registry and TTL-cap assertions). C3's A3 check compares medians (open circuit vs healthy) instead of single requests (D34).
 
 **Invariants**: I1 zero 404/5xx on prerendered routes, I2 zero abnormal exits and unhandledRejections, I3 latency bound, I4 hits resume within 10 s after recovery, I5 with a healthy Redis no old data is served as fresh after an invalidation.
 
@@ -397,7 +423,8 @@ setup (matrix, pack -> tgz artifact)                    [P0c~]
   - `release.yml`: `gate` (ci.yml level=full) + `chaos` (required subset: `startup.test.ts` C1, C9 and `rolling.test.ts` C11, C12) -> `release` with `needs: [gate, chaos]`. The planned C3 (unresponsive) and C7 (eviction) join the subset in the phase that adds them (P3, P6). The publishing setup (NPM_TOKEN, tag-referenced actions, Node 20) was replaced in P1 by OIDC, SHA pinning and Node 24 (release job: checkout v7.0.1, setup-node v7.0.0, changesets/action v1.9.0 pinned to SHAs, Node 24 + `npm@11.20.0`, no token, `id-token: write` only in the release job, skipped on forks).
   - P1: an `@redis/client 6` cell in the ci.yml integration matrix (Redis 8.4, `npm i --no-save @redis/client@6`, then typecheck + the whole integration layer). Cell name `integration (Redis x, @redis/client lock|6)`, the client is part of the blob and artifact names (no collisions in the merged coverage). fault and oracle are not run in the 6 cell - mini-redis speaks RESP2 only and 6 opens with `HELLO 3`.
   - P1: `scripts/check-commit-messages.mjs` in the static job (checkout with `fetch-depth: 0`): every commit in `origin/master..HEAD` (falling back to the pushed range, then HEAD) must be free of Hangul.
-  - Static workflow check: `docker run --rm -v <repo>:/repo -w /repo rhysd/actionlint` (local, nothing to install). Only one info finding (quoting in the gate's `node -e`).
+  - Static workflow check: `docker run --rm -v <repo>:/repo -w /repo rhysd/actionlint` (local, nothing to install). Only one info finding (quoting in the gate's `node -e`). In Git Bash on Windows prefix `MSYS_NO_PATHCONV=1` (otherwise `-w /repo` is rewritten to a Windows path).
+  - 2.0 (P3..P6): the contract job also runs the runtime fallback contract and the README type check per variant (same step, `contract-types.mjs`); chaos.yml starts `prodlike` too (C7, C8); the release chaos subset is startup + rolling + degraded + pressure (D39); release.yml also runs on `next` for the prereleases (section 12.2).
 
 ### 6.9 Regression mapping (fails on 1.0.6 first)
 
@@ -460,6 +487,23 @@ Local results (end of P1, Windows + Docker Desktop, Next 16.3.6, tarball install
 
 Controls that pass on 1.0.6 (= not bugs) are kept as well: immediate expiry `updateTags(tags)` agrees with the oracle (at least 10 hits and 10 misses observed), the legacy handler checks readiness first and queues nothing while reconnecting, the updateTag server action is applied immediately, C2 and C5 keep I1 (all 200) and I4 (hits resume within 10 s).
 
+**2.0 conversion status (P2..P6, `feat/v2`)** - no reproduction marker is left (`grep -rn "itRepro(|repro(\"|ts-expect-error [7-" tests` finds only the helper definitions). Each fixing commit removed its markers; tests of 1.x-only APIs were restated against their 2.x replacement in the same commit.
+
+| ID | Converted in 2.0 | Commit (phase) |
+|---|---|---|
+| 7-1 | oracle with durations: the fixed program from master (reference `k0=stale:v1`, 1.x `k0=miss`) + 60 random programs that must produce >3 stale answers; integration: older entry served stale once, shared tag state both ways | 3798f43 (P2) |
+| 7-2 | fault x2 (connectRedis wiring settles as a miss within 1.5 s; a throwing client function is a miss), chaos C1 x2, C9 | 3798f43 (P2), 175ed44 (P3) |
+| 7-5 | integration x2 (nothing but `_tagstate` outlives the entries; a corrupted tag field does not stop other invalidations) + "every entry key has a TTL" | 3798f43 (P2) |
+| 7-6 | integration x2 (SWR after `revalidateTag(t, {expire})`; render across an invalidation is not fresh), e2e full-legacy x2, chaos C6, C13 | 3798f43 (P2), 175ed44 (P3) |
+| 7-8 | unit (peer `^16.1.0`), contract-types x2 (`@ts-expect-error` removed) | 3798f43 (P2) |
+| 7-9 | integration "keeps an old build still being read" (restated against `cleanupOldBuilds`), chaos C11/C12 (I1 by the fallback in P3; registry + TTL caps in P4) | 175ed44 (P3), 174b511 (P4) |
+| 7-11 | unit x3, integration (APP_ROUTE PTTL ~7.5 s) | 3798f43 (P2) |
+| 7-12 | integration x3 (NX leaves the entry unchanged, get never deletes, overlapping sets) | 3798f43 (P2) |
+| 7-13 | unit (use-cache key inside the namespace); README code blocks type-checked by contract-types (new) | 3798f43 (P2), 71971bb |
+| A2 | e2e static-site (empty Redis, no prewarm), unit build-output fallback | 175ed44 (P3) |
+
+Acceptance criteria evidence (local, Windows + Docker Desktop, Next 16.3.6 unless noted): A1 all 7-x above; A2 e2e + C1 (first page < 2 s without Redis); A3 fault (first call ~300 ms with readMs 300, then < 50 ms each) + chaos C3 (median +< 50 ms with the circuit open); A4 fault (no queued/replayed command for 50 x get/set/updateTags while reconnecting, zero unhandled rejections) + chaos C2, C5; A5 integration (10 simulated deployments: <= 2 builds of keys + 2 shared keys, only `_tagstate`/`_builds` without TTL); A6 e2e (prewarmed and re-seeded pages answer `/_tree` prefetches with 200); A7 e2e full-cc (one stale answer + one regeneration after 'max', `updateTag` read-your-own-writes on 16.1 and 16.3) and full-legacy; A8 e2e full-cc (invalidation on instance a, instance b reads new data) + integration; A9 perf (one build 17,424,668 B vs 149,519,924 B in 1.1.0 = -88.3%); A10 is P5 (docs).
+
 ---
 
 ## 7. Roadmap
@@ -471,13 +515,15 @@ Controls that pass on 1.0.6 (= not bugs) are kept as well: immediate expiry `upd
 | **P0c test apps, harness** | 3 apps, `_variants` 16.1/16.3/canary, `pack`, `prepare-app` (tgz, `npm:1.0.6`, `--hot-dist`), origin server, fleet (LB, rolling), test hooks, `NRC_API` v1/v2 adapters, contract and e2e jobs | every app builds standalone on 16.1 and 16.3, a 2-instance fleet runs with **1.0.6 (v1 API)**, `npm ls` single Next, cacheComponents constraint confirmed | P0b | L |
 | **P0d reproductions, baselines** | `it.fails`, e2e and chaos failures from the 6.9 mapping, oracle diff, perf baseline (1.0.6 round trips, memory) committed | every item reproduced on 1.0.6, baseline JSON committed, ci e2e (pr) works | P0c | M |
 | **P0e nightly, reporting** | `nightly.yml`, release gate, artifact reports, flakiness policy, Stryker | nightly completes once, release cannot publish without the gate | P0d | S |
-| **P1 1.1.0 hotfix** | section 4 list + LICENSE, exports types, SHA-pinned actions, OIDC | reproductions converted, static-site e2e segment prefetch 200, OIDC + provenance publish | P0e | M - **ready to publish** (only the OIDC publish itself remains, section 11) |
-| P2 v2 core | factory API, key schema and envelope, `_tagstate`, Next 16 semantics (legacy and use-cache SWR, `getExpiration=Infinity`), run pipeline (circuit, timeouts), logger and onEvent, `connectRedis`, build-phase no-op, TTL policy -> `2.0.0-next.0` | A1 (7-1, 2, 3, 5, 6, 7, 10, 11, 12), A4, A7, A8 - judged by oracle, fault, full-cc e2e | P0 | L |
-| P3 fallback, prewarm | FileSystemCache fallback, re-seed, new prewarm, Next matrix contract -> `next.1` | A2, A3, A6 (static-site e2e, C1, C3, C6), 16.1 and 16.3 pass | P2 | M |
-| P4 maintenance | `cleanupOldBuilds`, `whenReady`, `startCacheMaintenance`, v1 layout compatibility, reserved `_*`, deprecated `cleanupOldBuildKeys` -> `next.2` | A5 (C11, C12, integration) | P2 | S-M |
-| P5 docs integration | switch docs configuration, delete the wrapper and `tests/unit/*`, docs keeps `test:e2e:prod` + production smoke after rollout (sitemap 200, logs, Redis keys and memory) | A10, 24 h in production without incidents, one rollback rehearsal | P3, P4, P1 | S |
-| P6 optimization | compression, `MEMORY USAGE` measurement, `tagStateCacheMs`, pipelining, optional HEXPIRE (>= 7.4) -> `next.3` | A9, <= 2 round trips per hit | P2 | S-M |
-| P7 2.0.0 | README rewrite, MIGRATION.md, pre exit, docs `^2.0.0`, coverage and mutation gates become blocking | every acceptance criterion met, stable release | P5, P6 | S |
+| **P1 1.1.0 hotfix** | section 4 list + LICENSE, exports types, SHA-pinned actions, OIDC | reproductions converted, static-site e2e segment prefetch 200, OIDC + provenance publish | P0e | M - **done**, 1.1.0 released from master |
+| **P2 v2 core** | factory API, key schema and envelope, `_tagstate`, Next 16 semantics (legacy and use-cache SWR, `getExpiration=Infinity`), run pipeline (circuit, timeouts), logger and onEvent, `connectRedis`, build-phase no-op, TTL policy -> `2.0.0-next.0` | A1 (7-1, 2, 3, 5, 6, 7, 10, 11, 12), A4, A7, A8 - judged by oracle, fault, full-cc e2e | P0 | L - **done** (3798f43; A7 on 16.1 completed by D43 in 57623bd) |
+| **P3 fallback, prewarm** | FileSystemCache fallback, re-seed, new prewarm, Next matrix contract -> `next.1` | A2, A3, A6 (static-site e2e, C1, C3, C6), 16.1 and 16.3 pass | P2 | M - **done** (175ed44) |
+| **P4 maintenance** | `cleanupOldBuilds`, `whenReady`, `startCacheMaintenance`, v1 layout compatibility, reserved `_*`, deprecated `cleanupOldBuildKeys` -> `next.2` | A5 (C11, C12, integration) | P2 | S-M - **done** (174b511; + chaos C8) |
+| P5 docs integration (main session) | switch docs configuration, delete the wrapper and `tests/unit/*`, docs keeps `test:e2e:prod` + production smoke after rollout (sitemap 200, logs, Redis keys and memory) | A10, 24 h in production without incidents, one rollback rehearsal | P3, P4, P1 | S |
+| **P6 optimization** | compression, `MEMORY USAGE` measurement, `tagStateCacheMs`, pipelining, optional HEXPIRE (>= 7.4) -> `next.3` | A9, <= 2 round trips per hit | P2 | S-M - **done** (57623bd; + chaos C7, C14) |
+| P7 2.0.0 (main session) | README rewrite, MIGRATION.md, pre exit, docs `^2.0.0`, coverage and mutation gates become blocking | every acceptance criterion met, stable release | P5, P6 | S - README, MIGRATION.md and the major changeset are ready (71971bb); the rest is in section 12 |
+
+The version tags `next.0..3` per phase were not cut: the phases were built in one run on `feat/v2` without publishing (Q18); the first prerelease is `2.0.0-next.0` with everything (section 12).
 
 Cluster verification and rollback (P5): replicas is 1, so there is no real canary. (1) Run the new image locally against production Redis (8.4, auth) through `kubectl -n mirunamu port-forward svc/redis-master 6379`, isolated in the namespace `docs-canary` (password read from the Secrets repo, never committed) (2) after deploying, smoke logs, Redis memory, key count, sitemap (3) roll back by reverting the helm-chart auto-tag commit -> ArgoCD. Old build keys stay with keepPrevious=1 + a 1-day TTL cap, so a rollback within a day is warm.
 
@@ -532,6 +578,37 @@ Cluster verification and rollback (P5): replicas is 1, so there is no real canar
 | D18 | (P1) The e2e full-legacy pinned 'max' reproduction moved from 7-1 to 7-6; oracle (durations) stays a 7-1 reproduction (P2) | after 1.1.0 the remaining causes are the legacy deletion and the SWR / Next getExpiration semantics respectively |
 | D19 | (P1) perf `--as <version>`, baseline `1.1.0.json` (with `packageVersionField: 1.0.6`) | before `changeset version` the installed version is still 1.0.6 - writing as-is would overwrite 1.0.6.json |
 | D20 | (P1) Commit-message check over `origin/master..HEAD` | the branch history was rewritten to English, so the whole range can be enforced |
+| D21 | (P2) `_tagstate` holds two fields per tag (`s:<tag>`, `x:<tag>`) instead of one `"stale,expired"` value | every update stays one idempotent HSET that leaves the other field alone - exactly Next's partial updates, no read-modify-write; the HMGET reads 2 fields per tag |
+| D22 | (P2) A legacy entry's lastModified is the time of the miss / stale / time-stale answer that triggered its render (5 min window, earliest pending wins), not the time of `set` | fixes C13 / 7-6 (an invalidation during a slow render left the old result fresh) for one and several instances; Next's own file-system cache has the same race. Worst case: one extra regeneration |
+| D23 | (P2) Implicit tags in use-cache `get`: the wrapper's getExpiration rule (`timestamp <= max(expired)`), entry tags: `areTagsExpired`/`areTagsStale`; `getExpiration` returns Infinity | identical outcomes to Next's default handler + wrapper (oracle, with and without durations), one round trip for the implicit tags |
+| D24 | (P2) Own timeout race for every command, the client's `timeout` option is not used | @redis/client's option only covers the time before the command is written |
+| D25 | (P2) Circuit breaker per client object, opened only by timeouts | handlers sharing a client share its health; WRONGTYPE/OOM are answers, not unresponsiveness |
+| D26 | (P2) A client function is awaited at most 3 s per call, the first client is kept, `null` is asked again (logged once as info) | a slow or never-settling function must not stall requests (7-2); `() => connectRedis(url)` resolves within waitMs |
+| D27 | (P2) `LegacyCacheHandler` (named/default export) and `registerInitialCache` removed, not deprecated | the factory replaces the static class; registerInitialCache called `set` of a 1.x class - `prewarmFromBuildOutput` replaces it (P3) |
+| D28 | (P2) Envelope: strings >= 1 KiB as blobs, compression only for payloads >= 1 KiB, brotli quality 4 | no JSON escaping of large HTML; quality 11 is far too slow per write, 4 is close to gzip speed with better ratios |
+| D29 | (P3) Test apps default to `NRC_API=v2` (the 2.x README wiring); `v1` only with a 1.x package | 2.x no longer exports the v1 API; baselines against npm 1.x still work |
+| D30 | (P3) The fleet drains in-flight requests before stopping an instance | C11/C12 reported 502s for requests killed mid-flight once the 404s were gone - a harness artifact, Kubernetes removes the endpoint first |
+| D31 | (P3) C11/C12 converted in P3 (the build-output fallback guarantees I1), cleanup assertions added in P4 | they assert I1 only; the registry/TTL behavior is checked separately |
+| D32 | (P3) e2e `repro.spec.ts` renamed `regressions.spec.ts` | nothing in them is an expected failure any more |
+| D33 | (P3) Runtime contract per Next variant: `tests/contract/runtime/fallback.contract.mjs` run by contract-types inside the variant install | guards the internal `file-system-cache.js` path on every PR for 16.1 and 16.3 (the e2e matrix covers 16.1 only nightly) |
+| D34 | (P3) C3's A3 check compares the median latency with the circuit open to the median with a healthy Redis (< 50 ms) | single requests on a shared Windows machine vary by more than 50 ms |
+| D35 | (P3) C3 simulates an unresponsive Redis with a 30 s downstream latency toxic, not a `timeout` toxic | the timeout toxic drops bytes, which desynchronizes RESP pipelining after recovery (replies matched to the wrong commands) - unlike a real stalled Redis |
+| D36 | (P2) use-cache `set` consumes the entry stream without `tee` | as planned; the e2e and oracle layers pass on 16.1 and 16.3 |
+| D37 | (P3) Build-output fallback while Redis is unusable: state "unknown", served as it is, no re-seed | the tag state cannot be read; serving the build is the documented degraded behavior |
+| D38 | (P3) Prewarm treats a page as partially prerendered when its meta has `postponed` (no `.rsc` read) | same rule as 1.1.0's verified prewarm; Next's request path decides per route |
+| D39 | (P3) Release chaos subset: startup, rolling, degraded (C3, C4, C10); P6 adds pressure (C7, C14) | D9 planned C3 and C7 |
+| D40 | (P4) 1.x tag hash names (`__sharedTags__`, `__sharedTagsTtl__`, `__revalidated_tags__`, `_tags`, `_tagTtls`, `_revalidated`) are not reserved owners for cleanup | 2.x never reads them; without the exception a 1.x layout without a build segment (`app:_tags`) would stay forever |
+| D41 | (P4) chaos.yml starts the prodlike profile too; new C8 (AOF restart) | C7 and C8 need a production-like Redis |
+| D42 | (P6) Compression default `"brotli"` (Q6 decided): one static-site build 17.4 MB (brotli) / 20.5 MB (gzip) / 122.5 MB (none) / 149.5 MB (1.1.0); p50/p99 unchanged within noise for all three | A9 (-88%) at no measurable latency cost; every setting reads every other |
+| D43 | (P6) `onTagExpired` gains `"auto"` (default): an expired page/route is a miss unless the path is a prerendered path of a `dynamicParams = false` route (prerender-manifest), then `lastModified -1` | the nightly e2e found that Next 16.1 serves a `-1` entry once (SWR) while 16.3 regenerates before answering; `updateTag` must be read-your-own-writes (A7) on both, and only fallback:false paths 404 on a miss. Matches Next's own FileSystemCache (null for expired tags) |
+| D44 | (P6) `tagStateTtlSeconds` (optional, off by default per Q10): HEXPIRE on the written fields = value + time until the latest recorded time; on Redis < 7.4 one warning, then no TTL | bounded tag state for apps with unbounded tag names; the invalidation itself must never depend on HEXPIRE |
+| D45 | (P6) `tagStateCacheMs` exists only for the use-cache handler (as drafted) | legacy pages are read once per render; stale local tag state there would serve invalidated HTML |
+| D46 | (P6) C7 lowers prodlike to 6 MB with CONFIG SET (restored afterwards) | a brotli build is ~17 MB, so 16 MB no longer forces eviction; CONFIG SET avoids recreating the container |
+| D47 | (P6) perf baseline `2.0.0-next.0.json` (with `--as`), perf `--compression` | the version field is still 1.1.0 until `changeset version`; the compression choice needs A/B measurements |
+| D48 | merged `origin/master` (1.1.0 release, deterministic 7-1 oracle program) into `feat/v2` with a normal merge; the fixed program became the regular 7-1 test, the random durations programs stay as a second test | coordinator request; the fixed program always shows the 1.x difference, the random ones cover the rest |
+| D49 | (P6) Stryker copies `tests/fixtures/next-build/.next` into its sandbox (negated ignore pattern) | the nightly mutation job failed its initial run: the fallback/prewarm tests could not read the fixture |
+| D50 | (docs) README code blocks that are complete files (first line `// <path>`) are type-checked by contract-types against the tarball and each Next variant | 7-13 mapping ("compile README code blocks"); catches docs that drift from the API (checked by injecting `keyPrefix`) |
+| D51 | (P3) `prepare-app --hot-dist` does not refresh the package code bundled into `instrumentation` | Next bundles instrumentation at build time; maintenance changes need a new app build (the handlers are loaded at runtime) |
 
 ---
 
@@ -551,6 +628,12 @@ Cluster verification and rollback (P5): replicas is 1, so there is no real canar
 - Configuring trusted publishing needs interactive 2FA - a 2FA-bypass token cannot replace `npm trust` or the web settings.
 - Once Stryker's vitest-runner supports vitest 5 properly, go back to per-test coverage mode (the command runner runs everything per mutant).
 - Windows Defender delays the first read of new files locally - exclude `.work/` (prepare-app absorbs it, but one static-site build takes 3+ minutes).
+- (2.0) Next's `isStale === -1` handling differs between minors (16.1: serve once + background regeneration; 16.3: regenerate before answering). `onTagExpired: "auto"` avoids depending on it for expired tags; stale tags (profiles) still return -1 and so behave per minor. The canary cell and the 16.1/16.3 e2e matrix watch it.
+- (2.0) The build-output fallback depends on `FileSystemCache`'s constructor options and `get(key, ctx)` shape (internal API). Guarded by the runtime contract per variant (D33) and the warning-and-off behavior when it cannot be loaded.
+- (2.0) The render-start timestamp (D22) is per process: an entry set by an instance that did not see the miss (it cannot happen through Next's flow, which gets before it sets) would use the set time.
+- (2.0) A circuit opened by one slow command skips Redis for `openMs` in every handler sharing that client - intended (A3), but a noisy neighbor on the Redis host can make an instance serve from the build output for 10 s at a time. `circuitBreaker: { openMs }` tunes it.
+- (2.0) `tagStateTtlSeconds` below `ttl.maxSeconds` lets entries (and the build output of a long-running build) older than an expired tag field count as fresh again - documented on the option.
+- (2.0) Rolling back from 2.x to a 1.x image: the 1.x docs cleanup deletes `docs:_tagstate`/`docs:_builds` like old builds (section 4) - loses 2.x invalidation times only.
 
 ---
 
@@ -567,6 +650,11 @@ Cluster verification and rollback (P5): replicas is 1, so there is no real canar
 | 2026-09-29 | P0d | Done. All of 7-1..7-13 + A2 reproduced on 1.0.6 (table in 6.9, confirmed with `NRC_REPRO=show`). 50 vitest expected failures (unit 9, fault 6, integration 17 x 2 versions, contract 1) + 10 chaos + 5 e2e + 2 tsc. Local `test:all` 87 passed + 50 expected failures, `test:chaos` 3 passed + 10 expected failures. perf baseline `tests/perf/baseline/1.0.6.json` (legacy hit 3 commands, use-cache page 8 commands, static-site build 123 keys, 116,060,896 bytes) committed; the CI perf gate passes on Linux against the same baseline |
 | 2026-09-29 | P0e | Done. nightly completed once via a `feat/**` push: [36521161066](https://github.com/mirunamu00/next-redis-cache/actions/runs/36521161066) 33 of 34 jobs green, 1 skipped (report, schedule only), 22 min - ci level=full (12 e2e cells = 3 apps x [16.1, 16.3] x [7.2, 8.4], contract 16.1, 16.3, canary, perf + timing, merged coverage), all chaos, quarantine, e2e on Node 24 (3 apps), mutation (22.3 min), canary e2e. release has `needs: [gate, chaos]`, so it cannot publish without ci full + the chaos subset (actionlint passes). Mutation score 27.6% (local, 671 mutants - Docker-free tests without the integration layer, report-only) |
 | 2026-09-29 | P1 | Ready to publish (feat/test-infra). Fixes 7-1, 7-3, 7-4, 7-7, 7-9, 7-10 + packaging (conditional types, engines, repository, peer `@redis/client ^5 \|\| ^6`) + OIDC release.yml + README (the P1 part of 7-13) + changeset (minor) + perf baseline 1.1.0. Conversion status and local results in 6.9, decisions D11..D20, publishing in section 11. CI: [36528242579](https://github.com/mirunamu00/next-redis-cache/actions/runs/36528242579) (17 jobs green, including the @redis/client 6 cell and unit-windows), [36528501162](https://github.com/mirunamu00/next-redis-cache/actions/runs/36528501162) green |
+| 2026-09-29 | P2 | Done on `feat/v2` (worktree): 3798f43 - factory handlers, envelope, two-field tag state, Next 16 semantics, run pipeline + circuit, connectRedis, logger/onEvent, TTL policy. 7-1, 7-2, 7-5, 7-6, 7-8, 7-11, 7-12, 7-13 converted (6.9). Merged origin/master (1.1.0 release) in edc9da0 (D48) |
+| 2026-09-29 | P3 | Done: 175ed44 - build-output fallback + re-seed, prewarmFromBuildOutput, v2 test-app wiring, runtime contract per variant, chaos C3/C4/C10; A2, C1, C9, C6, C13, C11/C12 (I1) converted. Local: e2e 20/20 (16.3), chaos 21/21 |
+| 2026-09-29 | P4 | Done: 174b511 - cleanupOldBuilds, whenReady, startCacheMaintenance, 1.x layouts, chaos C8. CI [36537773829](https://github.com/mirunamu00/next-redis-cache/actions/runs/36537773829) green (pr level). Nightly [36537774886](https://github.com/mirunamu00/next-redis-cache/actions/runs/36537774886) failed: full-cc e2e on 16.1 (updateTag answered stale once -> D43) and the weekly mutation job (fixture missing in the Stryker sandbox -> D49); everything else green |
+| 2026-09-29 | P6 | Done: 57623bd - brotli default (D42), tagStateTtlSeconds/HEXPIRE, onTagExpired "auto" (D43), perf --compression + baseline 2.0.0-next.0 (A9 -88.3%), chaos C7/C14. 3ac5564 Stryker sandbox fix. Local after the fix: e2e 20/20 on 16.3 and 20/20 on 16.1, chaos 21/21, integration 44 x 2 versions, contract-types 16.1 + 16.3 (types, runtime, README) |
+| 2026-09-29 | docs | 71971bb README for 2.0 + MIGRATION.md + major changeset + README type check (D50); 682dd24 chaos subset/header; e6fe77f test defaults (10 s timeouts, no circuit) and release.yml on `next`. CI [36542990088](https://github.com/mirunamu00/next-redis-cache/actions/runs/36542990088) green at 682dd24. All layers together: 301 tests, coverage lines 96.5 % / branches 88.7 % / functions 94.8 %, every file >= 83 % lines |
 | 2026-09-29 | P1 | User decision Q20: Markdown and commit messages English too. This document, `tests/perf/README.md` and `tests/fixtures/next-build/README.md` translated; `check-no-hangul` covers Markdown; `check-commit-messages` added (`origin/master..HEAD`); branch history rewritten to English and force-pushed (e2e277a) |
 
 ---
@@ -614,3 +702,68 @@ git tag v1.1.0
 - In PowerShell set the same values with `$env:NPM_TOKEN` and `$env:NPM_CONFIG_USERCONFIG`, then `Remove-Item Env:NPM_TOKEN`.
 - Order matters: pushing the version commit to master runs release.yml. **Finish the local publish first** so the release job's `changeset publish` finds 1.1.0 already published and does nothing (pushing first without trusted publishing makes the publish step fail on authentication).
 - A local publish cannot produce provenance (`--provenance` only works on supported CI).
+
+---
+
+## 12. 2.0.0-next prerelease and handoff (P5, P7)
+
+### 12.1 State of `feat/v2`
+
+Everything of P2, P3, P4 and P6 is on `feat/v2` (pushed; never merged into master or `next`, nothing published). No reproduction marker is left in any layer (6.9). Package: `version` is still 1.1.0 (from master); `.changeset/v2-major.md` (major) makes it 2.0.0 / 2.0.0-next.0. Gates: typecheck, lint, build, quality (publint, attw, size-limit, check-pack, check-no-hangul), check-commit-messages, check-quarantine.
+
+### 12.2 Publishing 2.0.0-next.N (main session)
+
+Prerequisite: npm trusted publishing is configured for `release.yml` (section 11, done for 1.1.0) - it covers every branch of that workflow.
+
+1. Create the `next` branch from `feat/v2` (or merge `feat/v2` into it): `git switch -c next origin/feat/v2`.
+2. Enter pre mode **on `next` only**: `npx changeset pre enter next` -> commit `.changeset/pre.json` (`chore: enter changesets pre mode (next)`).
+3. `git push origin next` -> ci.yml (push to `next`) and release.yml (now also on `next`): gate = ci level full + chaos subset (startup, rolling, degraded, pressure), then changesets/action opens "chore: release (next)" (`2.0.0-next.0`, CHANGELOG). Merge it -> the next run publishes `2.0.0-next.0` with dist-tag `next` and provenance.
+4. Later prereleases: add changesets on `next` -> `2.0.0-next.1`, ...
+5. Check: `npm view @mirunamu/next-redis-cache dist-tags` (`latest` must still be 1.1.0), `npm view @mirunamu/next-redis-cache@2.0.0-next.0 dist.attestations`.
+
+Note: `npm version` runs the `version` lifecycle script (`changeset version`); use `--ignore-scripts` if a version is ever bumped by hand.
+
+### 12.3 P5 - docs app configuration (main session / docs-expert)
+
+Install `@mirunamu/next-redis-cache@2.0.0-next.N` (exact pin). Replace `cache/resilient-cache-handler.mjs`, `cache/redis-connect.mjs`, `cache/build-keys.mjs` and `tests/unit/*` with:
+
+```js
+// cache/config.mjs
+import { connectRedis } from "@mirunamu/next-redis-cache/redis";
+
+export const cacheConfig = {
+  client: () => connectRedis(process.env.REDIS_URL, { label: "docs" }), // null without REDIS_URL
+  namespace: process.env.CACHE_NAMESPACE || "docs", // "docs-canary" for the port-forward check
+  buildId: process.env.BUILD_ID || undefined, // CI sets the commit SHA; also read from .next/BUILD_ID
+};
+```
+
+```js
+// cache-handler.mjs
+import { createCacheHandler } from "@mirunamu/next-redis-cache";
+import { cacheConfig } from "./cache/config.mjs";
+export default createCacheHandler(cacheConfig);
+```
+
+```js
+// use-cache-handler.mjs
+import { createUseCacheHandler } from "@mirunamu/next-redis-cache/use-cache";
+import { cacheConfig } from "./cache/config.mjs";
+export default createUseCacheHandler(cacheConfig);
+```
+
+`src/instrumentation-node.ts`: keep the missing-REDIS_URL banner, replace `cleanup()` and `prewarm()` by `startCacheMaintenance({ config: cacheConfig })` (cleanup on, prewarm off - Q9). next.config stays as it is (`cacheHandler`, `cacheHandlers.default`, `cacheMaxMemorySize: 0`, `generateBuildId`).
+
+What changes in production (Redis 8.4, 384 MB volatile-lru, 1 replica):
+- keys `docs:<sha>:e:<path>` (brotli, TTL 30 days for static pages) + `docs:_tagstate` + `docs:_builds`. The existing `docs:_builds` registry (docs' build-keys.mjs) has the same format and is reused; the 1.x keys `docs:<sha>:/...` and `docs:<sha>:_tags|_tagTtls|_revalidated|uc:...` are removed by the first 2.x maintenance runs once idle for 30 min (the previous build is kept with a 1-day TTL cap).
+- The first 2.x pod starts with an empty cache for its build: every page comes from the build output and is re-seeded (`fallback` events, then `hit`). Expect Redis memory for one build around 15% of 1.x.
+- Logs: `[next-redis-cache] ...` transition lines; the cleanup logs one line per start (`cleanup: deleted N keys; ...`).
+- Smoke after rollout (5.7, 7): sitemap 200, `redis-cli --scan --pattern 'docs:*' | cut -d: -f2 | sort | uniq -c`, `MEMORY USAGE`, logs. Rollback: revert the helm-chart auto-tag commit; see MIGRATION.md "Rolling update from 1.x" (a 1.x cleanup deletes `docs:_tagstate`/`docs:_builds` - harmless for docs, which does not invalidate tags).
+
+### 12.4 P7 - 2.0.0 stable (main session)
+
+- [ ] P5 done (A10, 24 h in production, one rollback rehearsal).
+- [ ] `npx changeset pre exit` on `next`, merge `next` into master, "chore: release" PR -> 2.0.0 (`latest`).
+- [ ] Q13: make coverage and mutation blocking - add `thresholds: { lines: 90, branches: 85, functions: 90, perFile: ... }` to the vitest coverage config used by the ci `coverage` job (currently report-only; merged coverage is 96.5 / 88.7 / 94.8, every file >= 83 % lines) and `thresholds.break: 70` in stryker.config.mjs (see the latest mutation score in section 10).
+- [ ] docs `^2.0.0`.
+- [ ] Remaining known gaps: `@redis/client` 6 is covered by typecheck + integration only (mini-redis speaks RESP2; section 9); `cleanupOldBuildKeys` removal is planned for 3.0.

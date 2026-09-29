@@ -121,6 +121,8 @@ export function verifySingleInstances(dir) {
 function hotDist(dir) {
   const dist = path.join(REPO_ROOT, "dist");
   if (!exists(dist)) throw new Error("dist/ is missing - run `npm run build` first");
+  // The installed files no longer match any tarball: the next regular run must reinstall
+  rmrf(path.join(dir, ".nrc-pkg.json"));
   const targets = [path.join(dir, ...PACKAGE_DIR)];
   const builds = path.join(dir, "builds");
   if (exists(builds)) for (const b of readdirSync(builds)) targets.push(path.join(builds, b, ...PACKAGE_DIR));

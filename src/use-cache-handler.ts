@@ -1,22 +1,43 @@
 /**
- * New cacheHandlers (plural) implementation for `use cache` directive.
+ * "use cache" handler (`next.config` `cacheHandlers`), Next.js 16 CacheHandler interface.
  *
- * Implements the CacheHandler interface from next/dist/server/lib/cache-handlers/types.
- * Stores ReadableStream<Uint8Array> entries in Redis as base64 + metadata.
+ * get(key, softTags)
+ *   GET entry + HMGET of the implicit (soft) tags in one round trip, HMGET of the entry's own tags
+ *   when needed (second round trip). Semantics of Next's default handler and use-cache wrapper
+ *   (ROADMAP.md 5.2):
+ *     expire < 0 (eviction mark) or past expire             -> miss
+ *     past revalidate                                       -> returned as is: Next serves it and
+ *                                                              regenerates in the background (swr);
+ *                                                              a miss with swr: false
+ *     implicit tag expired at/after the entry was created   -> miss (the wrapper's getExpiration rule)
+ *     own tag expired (areTagsExpired)                      -> miss
+ *     own tag stale (areTagsStale)                          -> revalidate: -1 (served stale, regenerated)
+ * getExpiration() returns Infinity: implicit tags are checked in get, in the same round trip.
+ * updateTags(tags, durations)  one HSET of the shared tag state (the same state the legacy handler uses).
+ * set  one SET with EX = the entry's remaining lifetime; the value stream is stored as raw bytes.
  */
+import { buildIdResolver, resolveConfig } from "./config";
+import { decodeEnvelope, encodeEnvelope, EnvelopeFormatError } from "./envelope";
+import { tagStateKey, useCacheKey } from "./keys";
+import { FailureReporter, reportFailure } from "./logger";
+import { isUnavailable, Runner } from "./runner";
+import { bufferToStream, streamToBuffer } from "./stream-utils";
+import {
+  areTagsExpired,
+  areTagsStale,
+  missingTags,
+  parseTagFields,
+  softTagsDiscard,
+  tagFields,
+  TagStateCache,
+  updateFields,
+  type TagTable,
+} from "./tag-state";
+import { setOptions } from "./ttl";
+import type { CacheEvent, UseCacheConfig, UseCacheEntry, UseCacheHandler } from "./types";
 
-import { streamToBuffer, bufferToStream } from "./stream-utils";
-import { TagManager } from "./tag-manager";
-import { runCommand } from "./redis-client";
-import { ErrorReporter } from "./error-reporter";
-import { resolveOptions, type UseCacheHandlerOptions } from "./types";
-
-// ------------------------------------------------------------------
-// Types aligned with next/dist/server/lib/cache-handlers/types
-// ------------------------------------------------------------------
-
-interface CacheEntry {
-  value: ReadableStream<Uint8Array>;
+/** Metadata stored next to the value bytes. */
+export interface UseCacheMeta {
   tags: string[];
   stale: number;
   timestamp: number;
@@ -24,218 +45,195 @@ interface CacheEntry {
   revalidate: number;
 }
 
-interface CacheHandler {
-  get(cacheKey: string, softTags: string[]): Promise<CacheEntry | undefined>;
-  set(cacheKey: string, pendingEntry: Promise<CacheEntry>): Promise<void>;
-  refreshTags(): Promise<void>;
-  getExpiration(tags: string[]): Promise<number>;
-  updateTags(
-    tags: string[],
-    durations?: { expire?: number }
-  ): Promise<void>;
+function unique(list: readonly string[] | undefined): string[] {
+  return [...new Set((list ?? []).filter(Boolean))];
 }
 
-// ------------------------------------------------------------------
-// Serialized form stored in Redis
-// ------------------------------------------------------------------
-
-interface StoredEntry {
-  /** base64-encoded stream data */
-  data: string;
-  tags: string[];
-  stale: number;
-  timestamp: number;
-  expire: number;
-  revalidate: number;
-}
-
-// ------------------------------------------------------------------
-// Factory
-// ------------------------------------------------------------------
-
-const debug = typeof process.env.NEXT_PRIVATE_DEBUG_CACHE !== "undefined";
-
-function log(method: string, key: string, msg: string) {
-  if (debug) {
-    console.info("[use-cache-handler] [%s] [%s] %s", method, key, msg);
+/**
+ * Creates the handler for `next.config` `cacheHandlers.default` / `.remote`:
+ *
+ * ```js
+ * // use-cache-handler.mjs
+ * import { createUseCacheHandler } from "@mirunamu/next-redis-cache/use-cache";
+ * import { connectRedis } from "@mirunamu/next-redis-cache/redis";
+ * export default createUseCacheHandler({ client: () => connectRedis(process.env.REDIS_URL), namespace: "my-app" });
+ * ```
+ */
+export function createUseCacheHandler(config: UseCacheConfig): UseCacheHandler {
+  const cfg = resolveConfig(config);
+  const swr = config.swr ?? true;
+  const tagCacheMs = config.tagStateCacheMs ?? 0;
+  if (typeof tagCacheMs !== "number" || !Number.isFinite(tagCacheMs) || tagCacheMs < 0) {
+    throw new TypeError(`[next-redis-cache] tagStateCacheMs must be a number >= 0, got ${String(tagCacheMs)}`);
   }
-}
+  const tagCache = new TagStateCache(tagCacheMs);
+  const runner = new Runner(cfg);
+  const reporter = new FailureReporter("use-cache", cfg.logger);
+  const buildId = buildIdResolver(cfg);
+  const tagKey = tagStateKey(cfg.namespace);
+  const keyOf = (cacheKey: string) => useCacheKey(cfg.namespace, buildId(), cacheKey);
+  /** Latest set per key; a get waits for it (7-12: an older set never clears a newer marker). */
+  const pending = new Map<string, { token: symbol; done: Promise<void> }>();
 
-export function createUseCacheHandler(
-  opts: UseCacheHandlerOptions
-): CacheHandler {
-  const resolved = resolveOptions(opts);
-  const client = resolved.client;
-  const keyPrefix = opts.useCacheKeyPrefix ?? `uc:${resolved.keyPrefix}`;
-  const timeoutMs = resolved.timeoutMs;
-  const tagManager = new TagManager(resolved);
-  const reporter = new ErrorReporter("use-cache");
+  const miss = (key: string, reason: Extract<CacheEvent, { type: "miss" }>["reason"]) => {
+    cfg.emit({ type: "miss", handler: "use-cache", key, reason });
+    return undefined;
+  };
+  const failed = (op: string, key: string, err: unknown) => reportFailure(reporter, cfg, "use-cache", op, key, err);
 
-  // Track pending set operations so concurrent gets can wait
-  const pendingSets = new Map<string, Promise<void>>();
-
-  function exec<T>(command: () => Promise<T>): Promise<T> {
-    return runCommand(client, command, timeoutMs);
+  /** Reads `tags` into `table` (cache first, then one HMGET). */
+  async function readTags(tags: readonly string[], table: TagTable): Promise<void> {
+    const rest = tagCache.lookup(tags, table, Date.now());
+    if (rest.length === 0) return;
+    const fields = await runner.run("read", (client) => client.hmGet(tagKey, tagFields(rest)) as Promise<unknown[]>);
+    parseTagFields(rest, fields, table);
+    tagCache.store(table, rest, Date.now());
   }
 
-  const handler: CacheHandler = {
-    async get(
-      cacheKey: string,
-      softTags: string[]
-    ): Promise<CacheEntry | undefined> {
+  return {
+    async get(cacheKey, softTags) {
+      const waiting = pending.get(cacheKey);
+      if (waiting) await waiting.done;
+      if (cfg.isDisabled()) return miss(cacheKey, "disabled");
+
+      const soft = unique(softTags);
+      const table: TagTable = new Map();
+      let raw: Buffer | null;
       try {
-        // Wait for pending set on same key
-        const pending = pendingSets.get(cacheKey);
-        if (pending) {
-          log("get", cacheKey, "waiting for pending set");
-          await pending;
-        }
-
-        const raw = await exec(() => client.get(keyPrefix + cacheKey));
+        const key = keyOf(cacheKey);
+        const softRest = tagCache.lookup(soft, table, Date.now());
+        const [value, fields] = await runner.run("read", (client, binary) =>
+          Promise.all([
+            binary.get(key) as Promise<Buffer | null>,
+            softRest.length > 0 ? (client.hmGet(tagKey, tagFields(softRest)) as Promise<unknown[]>) : Promise.resolve([]),
+          ]),
+        );
         reporter.success();
-
-        if (!raw) {
-          log("get", cacheKey, "miss");
-          return undefined;
-        }
-
-        const stored: StoredEntry = JSON.parse(raw);
-
-        // Check expiration (revalidate-based, same logic as Next.js default handler)
-        const now = performance.timeOrigin + performance.now();
-        if (now > stored.timestamp + stored.revalidate * 1000) {
-          log("get", cacheKey, "expired (revalidate)");
-          return undefined;
-        }
-
-        // Check soft tags staleness
-        if (softTags.length > 0) {
-          const expiration = await tagManager.getTagExpiration(softTags);
-          if (expiration > 0 && expiration > stored.timestamp) {
-            log("get", cacheKey, "stale (soft tag)");
-            return undefined;
-          }
-        }
-
-        // Check entry tags staleness
-        if (stored.tags.length > 0) {
-          const expiration = await tagManager.getTagExpiration(stored.tags);
-          if (expiration > 0 && expiration > stored.timestamp) {
-            log("get", cacheKey, "stale (entry tag)");
-            return undefined;
-          }
-        }
-
-        // Restore stream from base64
-        const buffer = Buffer.from(stored.data, "base64");
-        const value = bufferToStream(buffer);
-
-        log("get", cacheKey, "hit");
-
-        return {
-          value,
-          tags: stored.tags,
-          stale: stored.stale,
-          timestamp: stored.timestamp,
-          expire: stored.expire,
-          revalidate: stored.revalidate,
-        };
+        raw = value;
+        parseTagFields(softRest, fields, table);
+        tagCache.store(table, softRest, Date.now());
       } catch (err) {
-        log("get", cacheKey, `error: ${err}`);
-        reporter.failure("get", cacheKey, err);
-        return undefined;
+        failed("get", cacheKey, err);
+        return miss(cacheKey, isUnavailable(err) ? "unavailable" : "error");
       }
+      if (!raw) return miss(cacheKey, "absent");
+
+      let meta: UseCacheMeta;
+      let value: unknown;
+      try {
+        ({ meta, value } = await decodeEnvelope<UseCacheMeta>(raw));
+      } catch (err) {
+        if (!(err instanceof EnvelopeFormatError)) throw err;
+        cfg.logger.debug(`use-cache get ${cacheKey}: unreadable entry (${err.message})`);
+        return miss(cacheKey, "format");
+      }
+      if (!Buffer.isBuffer(value)) return miss(cacheKey, "format");
+
+      const now = Date.now();
+      if (meta.expire < 0 || now > meta.timestamp + meta.expire * 1000) return miss(cacheKey, "expired");
+      if (!swr && now > meta.timestamp + meta.revalidate * 1000) return miss(cacheKey, "expired");
+      if (softTagsDiscard(soft, table, meta.timestamp)) return miss(cacheKey, "tag");
+
+      const tags = unique(meta.tags);
+      const rest = missingTags(tags, table);
+      if (rest.length > 0) {
+        try {
+          await readTags(rest, table);
+        } catch (err) {
+          // The entry itself was read: without its tag state it is served as it is
+          failed("get", cacheKey, err);
+        }
+      }
+      if (areTagsExpired(tags, table, meta.timestamp, now)) return miss(cacheKey, "tag");
+      let revalidate = meta.revalidate;
+      if (areTagsStale(tags, table, meta.timestamp)) {
+        revalidate = -1;
+        cfg.emit({ type: "stale", handler: "use-cache", key: cacheKey, reason: "tag" });
+      } else {
+        cfg.emit({ type: "hit", handler: "use-cache", key: cacheKey });
+      }
+      return {
+        value: bufferToStream(value),
+        tags: meta.tags,
+        stale: meta.stale,
+        timestamp: meta.timestamp,
+        expire: meta.expire,
+        revalidate,
+      };
     },
 
-    async set(
-      cacheKey: string,
-      pendingEntry: Promise<CacheEntry>
-    ): Promise<void> {
-      log("set", cacheKey, "start");
-
-      let resolvePending: () => void = () => {};
-      const pendingPromise = new Promise<void>((resolve) => {
-        resolvePending = resolve;
-      });
-      pendingSets.set(cacheKey, pendingPromise);
-
-      // Only a failed Redis write is reported; a rejected pending entry is a failed render
-      let writing = false;
+    async set(cacheKey, pendingEntry) {
+      const token = Symbol(cacheKey);
+      let release!: () => void;
+      const done = new Promise<void>((resolve) => (release = resolve));
+      pending.set(cacheKey, { token, done });
+      let entry: UseCacheEntry;
       try {
-        const entry = await pendingEntry;
-
-        // Tee the stream: one for consumption, one preserved on entry
-        const [forStorage, preserved] = entry.value.tee();
-        entry.value = preserved;
-
-        // Consume the stream to buffer
-        const buffer = await streamToBuffer(forStorage);
-        const data = buffer.toString("base64");
-
-        const stored: StoredEntry = {
-          data,
-          tags: entry.tags,
+        entry = await pendingEntry;
+      } catch {
+        // A failed render: nothing to store, and not a Redis failure
+        finish();
+        return;
+      }
+      try {
+        if (cfg.isDisabled()) return;
+        const key = keyOf(cacheKey);
+        if (entry.expire < 0) {
+          // Eviction mark (Next 16.3): drop the stored entry
+          await runner.run("write", (client) => client.unlink(key));
+          reporter.success();
+          return;
+        }
+        await runner.available(); // fail fast, before reading the stream, while Redis is unavailable
+        const bytes = await streamToBuffer(entry.value);
+        const lifetimeSeconds = swr ? entry.expire : Math.min(entry.expire, entry.revalidate);
+        const remainingMs = lifetimeSeconds * 1000 - (Date.now() - entry.timestamp);
+        if (!(remainingMs > 0)) return; // already expired: nothing worth storing
+        const ttl = Math.max(1, Math.min(Math.ceil(remainingMs / 1000), Math.floor(cfg.maxSeconds)));
+        const meta: UseCacheMeta = {
+          tags: entry.tags ?? [],
           stale: entry.stale,
           timestamp: entry.timestamp,
           expire: entry.expire,
           revalidate: entry.revalidate,
         };
-
-        const serialized = JSON.stringify(stored);
-        const fullKey = keyPrefix + cacheKey;
-
-        // Calculate TTL in seconds from now
-        const ttlSeconds = Math.max(
-          1,
-          Math.floor(entry.expire - (Date.now() - entry.timestamp) / 1000)
-        );
-
-        writing = true;
-        await exec(() => client.set(fullKey, serialized, { EX: ttlSeconds }));
-
+        const body = await encodeEnvelope(meta, bytes, cfg.compression);
+        await runner.run("write", (client) => client.set(key, body, setOptions(ttl)));
         reporter.success();
-        log("set", cacheKey, `done (${buffer.byteLength} bytes)`);
+        cfg.emit({ type: "set", handler: "use-cache", key: cacheKey, bytes: body.byteLength });
       } catch (err) {
-        log("set", cacheKey, `error: ${err}`);
-        if (writing) reporter.failure("set", cacheKey, err);
+        failed("set", cacheKey, err);
       } finally {
-        resolvePending();
-        pendingSets.delete(cacheKey);
+        finish();
+      }
+
+      function finish() {
+        if (pending.get(cacheKey)?.token === token) pending.delete(cacheKey);
+        release();
       }
     },
 
-    async refreshTags(): Promise<void> {
-      // For distributed Redis, tags are already shared via Redis Hash.
-      // No additional sync needed — all instances read from the same source.
-      log("refreshTags", "-", "no-op (Redis is shared)");
+    async refreshTags() {
+      // Tag state lives in Redis and is read with every get (tagStateCacheMs bounds any local copy)
     },
 
-    async getExpiration(tags: string[]): Promise<number> {
-      try {
-        const expiration = await tagManager.getTagExpiration(tags);
-        if (tags.length > 0) reporter.success(); // no tags = no Redis round trip
-        return expiration;
-      } catch (err) {
-        log("getExpiration", "-", `error: ${err}`);
-        reporter.failure("getExpiration", tags.join(","), err);
-        return 0;
-      }
+    async getExpiration() {
+      // Implicit tags are checked in get(), in the same round trip as the entry
+      return Infinity;
     },
 
-    async updateTags(
-      tags: string[],
-      durations?: { expire?: number }
-    ): Promise<void> {
+    async updateTags(tags, durations) {
+      const list = unique(tags);
+      if (list.length === 0 || cfg.isDisabled()) return;
+      const fields = updateFields(list, durations, Date.now());
       try {
-        await tagManager.updateTagTimestamps(tags, durations);
-        if (tags.length > 0) reporter.success(); // no tags = no Redis round trip
-        log("updateTags", tags.join(","), "done");
+        await runner.run("write", (client) => client.hSet(tagKey, fields));
+        reporter.success();
       } catch (err) {
-        log("updateTags", tags.join(","), `error: ${err}`);
-        reporter.failure("updateTags", tags.join(","), err);
+        failed("updateTags", list.join(","), err);
+      } finally {
+        tagCache.invalidate(list);
       }
     },
   };
-
-  return handler;
 }

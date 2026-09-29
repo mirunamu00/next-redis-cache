@@ -16,7 +16,6 @@ import type { CacheHandler } from "next/dist/server/lib/cache-handlers/types";
 import { startMiniRedis, type MiniRedis } from "../../support/mini-redis";
 import { uniqueNamespace } from "../../support/namespace";
 import { readEntry, useCacheEntry } from "../../support/handlers";
-import { itRepro } from "../../support/repro";
 import { createUseCacheHandler } from "../../../src/use-cache-handler";
 
 const require = createRequire(import.meta.url);
@@ -52,8 +51,25 @@ const updateOp = (withDurations: boolean) =>
     tags: fc.subarray(TAGS, { minLength: 1 }),
     expire: withDurations ? fc.constantFrom(0, 5, 60, 31_536_000) : fc.constant(undefined),
   });
+// With durations, stale answers need set -> (time passes) -> updateTags on one of its tags -> get of that key;
+// random programs rarely produce that order, so it is also generated as one chunk.
+const staleScenario = fc
+  .tuple(setOp, fc.integer({ min: 1, max: 2000 }), updateOp(true), fc.subarray(TAGS))
+  .map(([set, ms, update, softTags]): Op[] => [
+    set,
+    { op: "advance", ms },
+    { ...update, tags: set.tags.length > 0 ? set.tags : update.tags },
+    { op: "get", key: set.key, softTags },
+  ]);
 const program = (withDurations: boolean) =>
-  fc.array(fc.oneof(setOp, getOp, getOp, advanceOp, updateOp(withDurations)), { minLength: 4, maxLength: 24 });
+  withDurations
+    ? fc
+        .array(fc.oneof(setOp.map((o): Op[] => [o]), getOp.map((o): Op[] => [o]), advanceOp.map((o): Op[] => [o]), updateOp(true).map((o): Op[] => [o]), staleScenario), {
+          minLength: 2,
+          maxLength: 12,
+        })
+        .map((chunks) => chunks.flat())
+    : fc.array(fc.oneof(setOp, getOp, getOp, advanceOp, updateOp(false)), { minLength: 4, maxLength: 24 });
 
 let clock = 0;
 let redis: MiniRedis;
@@ -123,7 +139,11 @@ async function differential(ops: Op[]): Promise<{ reference: string[]; ours: str
   tagsManifest.clear();
   const reference = await execute(ops, createDefaultCacheHandler(50 * 1024 * 1024));
   clock = start;
-  const ours = await execute(ops, createUseCacheHandler({ client: client as never, keyPrefix: `${uniqueNamespace()}:` }) as CacheHandler);
+  // swr: false = the production behavior of Next's in-memory default handler (drops entries past revalidate)
+  const ours = await execute(
+    ops,
+    createUseCacheHandler({ client: client as never, namespace: uniqueNamespace(), buildId: "b", swr: false, disabled: false }) as CacheHandler,
+  );
   return { reference, ours };
 }
 
@@ -143,17 +163,19 @@ describe("use-cache handler vs Next's default handler", () => {
     expect(seen.miss).toBeGreaterThan(10);
   });
 
-  // 1.1.0 records `now` for durations (no more future timestamps), but two differences remain until the
-  // 2.0 tag state (P2): Next serves an older entry stale once (revalidate -1) where 1.x misses, and Next's
-  // default getExpiration returns the future `expired` time for such tags, so it discards soft-tagged
-  // entries written after the update where 1.x hits.
-  itRepro("7-1", "agrees when tags are revalidated with durations (revalidateTag(tag, profile))", async () => {
+  // Fixed in 2.0 (7-1): the shared tag state keeps Next's stale and expired time per tag, so an older entry
+  // is served stale once (revalidate -1), and implicit tags follow the wrapper's getExpiration rule inside get().
+  it("[7-1] agrees when tags are revalidated with durations (revalidateTag(tag, profile))", async () => {
+    let stale = 0;
     await fc.assert(
       fc.asyncProperty(program(true), async (ops) => {
         const { reference, ours } = await differential(ops);
         expect(ours).toEqual(reference);
+        stale += reference.filter((r) => r.includes("=stale:")).length;
       }),
       { numRuns: 60 },
     );
+    // Stale-while-revalidate answers must actually occur, or the comparison proves little
+    expect(stale).toBeGreaterThan(3);
   });
 });

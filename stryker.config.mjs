@@ -10,7 +10,7 @@ export default {
   testRunner: "command",
   commandRunner: { command: "npx vitest run --config vitest.mutation.config.ts --bail 1 --reporter dot" },
   coverageAnalysis: "off",
-  mutate: ["src/**/*.ts", "!src/types.ts", "!src/index.ts", "!src/use-cache.ts"],
+  mutate: ["src/**/*.ts", "!src/types.ts", "!src/index.ts", "!src/use-cache.ts", "!src/instrumentation.ts", "!src/redis-entry.ts"],
   reporters: ["clear-text", "progress", "html", "json"],
   htmlReporter: { fileName: "reports/mutation/index.html" },
   jsonReporter: { fileName: "reports/mutation/mutation.json" },

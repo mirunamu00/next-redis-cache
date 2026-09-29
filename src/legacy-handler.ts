@@ -1,371 +1,279 @@
 /**
- * Legacy cacheHandler (singular) implementation for ISR / Route Handler cache.
+ * Legacy `cacheHandler` (singular): ISR pages, route handlers and the fetch data cache.
  *
- * Implements the CacheHandler class expected by Next.js `cacheHandler` config.
- * Next.js instantiates this class and calls get/set/revalidateTag on it.
+ * createCacheHandler(config) returns the class Next.js instantiates (once per request) - all state
+ * lives in the factory closure, not in static fields, so several handlers can coexist.
+ *
+ * get   GET entry (+ HMGET of the request's tags, same round trip) -> HMGET of the entry's remaining
+ *       tags (second round trip, only when needed). Tag semantics are Next's own (ROADMAP.md 5.2):
+ *         FETCH       expired tag -> miss, stale tag -> served stale (lastModified -1)
+ *         pages/routes expired or stale tag -> served stale (lastModified -1: Next answers with it and
+ *                     regenerates in the background) - or a miss with onTagExpired: "miss"
+ *       Returning null for a prerendered page would make a `dynamicParams = false` route answer 404.
+ * set   one SET with EX (TTL from the write, 7-11) - no side hashes, nothing to go out of sync (7-12).
+ * revalidateTag(tags, durations)  one HSET of the shared tag state; no key is deleted (7-5, 7-6).
+ *
+ * Entries regenerated after a miss or a stale answer are stored with the time of that answer as
+ * lastModified (the time the render started, not when it finished): an invalidation that lands while
+ * the render is running is newer than the entry, so the entry is served stale and regenerated again
+ * instead of passing as fresh (7-6, chaos C13).
  */
+import { buildIdResolver, resolveConfig, type ResolvedConfig } from "./config";
+import { decodeEnvelope, encodeEnvelope, EnvelopeFormatError } from "./envelope";
+import { entryKey, tagStateKey } from "./keys";
+import { FailureReporter, reportFailure } from "./logger";
+import { isUnavailable, Runner } from "./runner";
+import { areTagsExpired, areTagsStale, missingTags, parseTagFields, tagFields, updateFields, type TagTable } from "./tag-state";
+import { setOptions, ttlSeconds } from "./ttl";
+import type {
+  LegacyCacheHandlerClass,
+  LegacyCacheHandlerInstance,
+  LegacyCacheValue,
+  LegacyGetContext,
+  LegacyHandlerContext,
+  LegacySetContext,
+  RedisCacheConfig,
+} from "./types";
 
-import type { RedisClientType } from "@redis/client";
-import { parseBuffersToStrings, convertStringsToBuffers } from "./buffer-utils";
-import { TagManager } from "./tag-manager";
-import { assertClientReady, runCommand } from "./redis-client";
-import { resolveOptions, type OnCreationHook } from "./types";
-import { ErrorReporter } from "./error-reporter";
+const TAGS_HEADER = "x-next-cache-tags";
 
-// ------------------------------------------------------------------
-// Types aligned with next/dist/server/lib/incremental-cache
-// ------------------------------------------------------------------
-
-interface CacheHandlerContext {
-  dev?: boolean;
-  serverDistDir?: string;
-  maxMemoryCacheSize?: number;
-  revalidatedTags: string[];
-  _requestHeaders: Record<string, string | string[] | undefined>;
-  [key: string]: unknown;
-}
-
-interface CacheHandlerValue {
+/** Metadata stored next to a legacy value. */
+export interface LegacyMeta {
   lastModified: number;
-  age?: number;
-  cacheState?: string;
-  value: unknown;
+  tags: string[];
+  revalidate?: number | false;
 }
 
-interface LifespanParameters {
-  lastModifiedAt: number;
-  staleAt: number;
-  expireAt: number;
-  staleAge: number;
-  expireAge: number;
-  revalidate: number | false | undefined;
-}
+/**
+ * Remembers when this process answered a key with a miss or a stale entry (Next renders it right
+ * after). The following set of that key uses this time as lastModified.
+ */
+class RenderStarts {
+  static readonly WINDOW_MS = 5 * 60_000;
+  static readonly MAX_KEYS = 10_000;
+  readonly #starts = new Map<string, number>();
 
-interface StoredCacheValue extends CacheHandlerValue {
-  tags: readonly string[];
-  lifespan: LifespanParameters | null;
-}
+  mark(key: string, now: number): void {
+    const t = this.#starts.get(key);
+    if (t !== undefined && now - t <= RenderStarts.WINDOW_MS) return; // keep the earliest pending render
+    this.#starts.delete(key);
+    if (this.#starts.size >= RenderStarts.MAX_KEYS) {
+      const oldest = this.#starts.keys().next().value;
+      if (oldest !== undefined) this.#starts.delete(oldest);
+    }
+    this.#starts.set(key, now);
+  }
 
-// ------------------------------------------------------------------
-// Internal state
-// ------------------------------------------------------------------
-
-const debug = typeof process.env.NEXT_PRIVATE_DEBUG_CACHE !== "undefined";
-const DEFAULT_STALE_AGE = 60 * 60 * 24 * 365; // 1 year
-
-function log(method: string, key: string, msg: string) {
-  if (debug) {
-    console.info("[cache-handler] [%s] [%s] %s", method, key, msg);
+  take(key: string, now: number): number {
+    const t = this.#starts.get(key);
+    this.#starts.delete(key);
+    return t !== undefined && now - t <= RenderStarts.WINDOW_MS ? Math.min(t, now) : now;
   }
 }
 
-function getLifespan(
-  lastModified: number,
-  revalidate: number | false | undefined,
-  defaultStaleAge: number,
-  estimateExpireAge: (s: number) => number
-): LifespanParameters {
-  const lastModifiedAt = Math.floor(lastModified / 1000);
-  const staleAge =
-    typeof revalidate === "number" ? revalidate : defaultStaleAge;
-  const expireAge = Math.min(Math.floor(estimateExpireAge(staleAge)), 2 ** 31 - 1);
-  return {
-    lastModifiedAt,
-    staleAt: lastModifiedAt + staleAge,
-    expireAt: lastModifiedAt + expireAge,
-    staleAge,
-    expireAge,
-    revalidate,
-  };
-}
-
-function getTagsFromHeaders(
-  headers: Record<string, unknown> | undefined
-): string[] {
-  if (!headers) return [];
-  const v = headers["x-next-cache-tags"];
-  if (Array.isArray(v)) return v as string[];
-  if (typeof v === "string") return v.split(",");
+function headerTags(headers: unknown): string[] {
+  const v = (headers as Record<string, unknown> | undefined)?.[TAGS_HEADER];
+  if (Array.isArray(v)) return v.filter((t): t is string => typeof t === "string" && t.length > 0);
+  if (typeof v === "string" && v) return v.split(",").filter(Boolean);
   return [];
 }
 
-function resolveRevalidate(
-  value: unknown,
-  ctx: Record<string, unknown>
-): number | false | undefined {
-  const v = value as Record<string, unknown> | null;
-  if (v?.kind === "FETCH") return v.revalidate as number;
-  if (v?.kind === "APP_PAGE" || v?.kind === "PAGES") {
-    const cc = ctx.cacheControl as { revalidate?: number } | undefined;
-    if (cc?.revalidate !== undefined) return cc.revalidate;
-  }
-  return ctx.revalidate as number | false | undefined;
+function unique(...lists: ReadonlyArray<readonly string[] | undefined>): string[] {
+  const out = new Set<string>();
+  for (const list of lists) for (const t of list ?? []) if (t) out.add(t);
+  return [...out];
 }
 
-// ------------------------------------------------------------------
-// CacheHandler class
-// ------------------------------------------------------------------
+/** Everything shared by the handler instances of one createCacheHandler() call. */
+export class LegacyCore {
+  readonly cfg: ResolvedConfig;
+  readonly runner: Runner;
+  readonly reporter: FailureReporter;
+  readonly #renders = new RenderStarts();
+  readonly #buildId: (distDir?: string) => string;
+  /** First non-empty context seen (Next passes the same one to every instance). */
+  context: LegacyHandlerContext = {};
 
-export class LegacyCacheHandler {
-  // Static configuration
-  static #onCreationHook: OnCreationHook | undefined;
-  static #context: CacheHandlerContext | undefined;
-  static #configTask: Promise<void> | undefined;
-
-  // Initialized state
-  static #client: RedisClientType | undefined;
-  static #tagManager: TagManager | undefined;
-  static #keyPrefix = "";
-  static #timeoutMs = 5000;
-  static #defaultStaleAge = DEFAULT_STALE_AGE;
-  static #estimateExpireAge: (s: number) => number = (s) =>
-    Math.floor(s * 1.5);
-  static #configured = false;
-  static #reporter = new ErrorReporter("legacy");
-
-  /**
-   * Register setup hook (called from consumer's cache-handler.mjs at module scope).
-   */
-  static onCreation(hook: OnCreationHook): void {
-    LegacyCacheHandler.#onCreationHook = hook;
+  constructor(cfg: ResolvedConfig) {
+    this.cfg = cfg;
+    this.runner = new Runner(cfg);
+    this.reporter = new FailureReporter("legacy", cfg.logger);
+    this.#buildId = buildIdResolver(cfg);
   }
 
-  static async #ensureConfigured(): Promise<void> {
-    if (LegacyCacheHandler.#configured) return;
-
-    if (!LegacyCacheHandler.#configTask) {
-      LegacyCacheHandler.#configTask = (async () => {
-        try {
-          await LegacyCacheHandler.#init();
-        } finally {
-          LegacyCacheHandler.#configTask = undefined;
-        }
-      })();
-    }
-
-    await LegacyCacheHandler.#configTask;
+  observe(ctx: LegacyHandlerContext | undefined): void {
+    if (ctx?.serverDistDir && !this.context.serverDistDir) this.context = ctx;
   }
 
-  static async #init(): Promise<void> {
-    if (LegacyCacheHandler.#configured) return;
-
-    const hook = LegacyCacheHandler.#onCreationHook;
-    if (!hook) {
-      throw new Error("[cache-handler] onCreation hook not registered");
-    }
-
-    const ctx = LegacyCacheHandler.#context;
-    const config = await hook({
-      serverDistDir: ctx?.serverDistDir,
-      dev: ctx?.dev,
-    });
-
-    if (!config) {
-      // null config = build phase, no Redis
-      LegacyCacheHandler.#configured = true;
-      return;
-    }
-
-    const opts = resolveOptions(config);
-    LegacyCacheHandler.#client = opts.client;
-    LegacyCacheHandler.#tagManager = new TagManager(opts);
-    LegacyCacheHandler.#keyPrefix = opts.keyPrefix;
-    LegacyCacheHandler.#timeoutMs = opts.timeoutMs;
-
-    if (config.defaultStaleAge !== undefined) {
-      LegacyCacheHandler.#defaultStaleAge = config.defaultStaleAge;
-    }
-    if (config.estimateExpireAge) {
-      LegacyCacheHandler.#estimateExpireAge = config.estimateExpireAge;
-    }
-
-    LegacyCacheHandler.#configured = true;
-    log("init", "-", "configured successfully");
+  distDir(): string | undefined {
+    const server = this.context.serverDistDir;
+    return server ? server.replace(/[\\/]server[\\/]?$/, "") : undefined;
   }
 
-  // ------------------------------------------------------------------
-  // Instance
-  // ------------------------------------------------------------------
-
-  constructor(context: CacheHandlerContext) {
-    LegacyCacheHandler.#context = context;
-    log("constructor", "-", "instance created");
+  key(cacheKey: string): string {
+    return entryKey(this.cfg.namespace, this.#buildId(this.distDir()), cacheKey);
   }
 
-  async get(
-    cacheKey: string,
-    _ctx?: Record<string, unknown>
-  ): Promise<CacheHandlerValue | null> {
-    await LegacyCacheHandler.#ensureConfigured();
+  #failed(op: string, cacheKey: string, err: unknown): void {
+    reportFailure(this.reporter, this.cfg, "legacy", op, cacheKey, err);
+  }
 
-    const client = LegacyCacheHandler.#client;
-    const tm = LegacyCacheHandler.#tagManager;
-
-    // No Redis (build phase or null config)
-    if (!client || !tm) return null;
-
-    const t = LegacyCacheHandler.#timeoutMs;
-    const fullKey = LegacyCacheHandler.#keyPrefix + cacheKey;
-
-    try {
-      const raw = await runCommand(client, () => client.get(fullKey), t);
-      LegacyCacheHandler.#reporter.success();
-
-      if (!raw) {
-        log("get", cacheKey, "miss");
-        return null;
-      }
-
-      const stored: StoredCacheValue = JSON.parse(raw);
-      if (!stored) return null;
-
-      // Restore buffers
-      if (stored.value) {
-        convertStringsToBuffers(stored.value);
-      }
-
-      // Check tag entry exists
-      const hasEntry = await tm.hasTagEntry(cacheKey);
-      if (!hasEntry) {
-        await runCommand(client, () => client.unlink(fullKey), t);
-        log("get", cacheKey, "orphaned (no tag entry)");
-        return null;
-      }
-
-      // Check lifespan expiry
-      if (stored.lifespan && stored.lifespan.expireAt < Math.floor(Date.now() / 1000)) {
-        log("get", cacheKey, "expired");
-        return null;
-      }
-
-      // Check tag revalidation
-      const softTags =
-        (_ctx as Record<string, unknown>)?.softTags as string[] | undefined;
-      const combinedTags = [
-        ...(stored.tags ?? []),
-        ...(softTags ?? []),
-      ];
-
-      if (await tm.isStale(combinedTags, stored.lastModified)) {
-        await runCommand(client, () => client.unlink(fullKey), t);
-        log("get", cacheKey, "stale (revalidated tag)");
-        return null;
-      }
-
-      log("get", cacheKey, "hit");
-      return stored;
-    } catch (err) {
-      log("get", cacheKey, `error: ${err}`);
-      LegacyCacheHandler.#reporter.failure("get", cacheKey, err);
+  async get(cacheKey: string, ctx: LegacyGetContext = {}): Promise<LegacyCacheValue | null> {
+    const cfg = this.cfg;
+    if (cfg.isDisabled()) {
+      cfg.emit({ type: "miss", handler: "legacy", key: cacheKey, reason: "disabled" });
       return null;
     }
-  }
-
-  async set(
-    cacheKey: string,
-    data: unknown,
-    ctx?: Record<string, unknown>
-  ): Promise<void> {
-    await LegacyCacheHandler.#ensureConfigured();
-
-    const client = LegacyCacheHandler.#client;
-    const tm = LegacyCacheHandler.#tagManager;
-    if (!client || !tm) return;
-
+    const requestTags = unique(ctx.tags, ctx.softTags);
+    const tagKey = tagStateKey(cfg.namespace);
+    const table: TagTable = new Map();
+    let raw: Buffer | null;
     try {
-      // Fail fast (before serializing) while Redis is unavailable
-      assertClientReady(client);
-
-      const tags: string[] =
-        (ctx?.tags as string[]) ??
-        getTagsFromHeaders(
-          (data as Record<string, unknown>)?.headers as
-            | Record<string, unknown>
-            | undefined
-        );
-
-      const revalidate = resolveRevalidate(data, ctx ?? {});
-      const lastModified = Math.round(
-        (ctx?.internal_lastModified as number) ?? Date.now()
+      const key = this.key(cacheKey);
+      const [value, fields] = await this.runner.run("read", (client, binary) =>
+        Promise.all([
+          binary.get(key) as Promise<Buffer | null>,
+          requestTags.length > 0 ? (client.hmGet(tagKey, tagFields(requestTags)) as Promise<unknown[]>) : Promise.resolve([]),
+        ]),
       );
-
-      const lifespan = getLifespan(
-        lastModified,
-        revalidate,
-        LegacyCacheHandler.#defaultStaleAge,
-        LegacyCacheHandler.#estimateExpireAge
-      );
-
-      // Skip if already expired
-      if (Date.now() > lifespan.expireAt * 1000) return;
-
-      // Serialize buffers
-      const valueForStorage = data ? { ...(data as object) } : null;
-      if (valueForStorage) {
-        parseBuffersToStrings(valueForStorage);
-      }
-
-      const stored: StoredCacheValue = {
-        lastModified,
-        value: valueForStorage,
-        tags: Object.freeze(tags),
-        lifespan,
-      };
-
-      const serialized = JSON.stringify(stored);
-      const fullKey = LegacyCacheHandler.#keyPrefix + cacheKey;
-      const t = LegacyCacheHandler.#timeoutMs;
-
-      const isNX = (ctx as Record<string, unknown>)?.setOnlyIfNotExists === true;
-
-      const ttlSeconds = Math.max(
-        1,
-        lifespan.expireAt - Math.floor(Date.now() / 1000)
-      );
-      const setOpts: Record<string, unknown> = { EX: ttlSeconds };
-      if (isNX) setOpts.NX = true;
-
-      await Promise.all([
-        // Store value with TTL in a single command
-        runCommand(client, () => client.set(fullKey, serialized, setOpts), t),
-        // Register tags
-        tm.setTags(cacheKey, tags),
-        // Register TTL
-        tm.setTtl(cacheKey, lifespan.expireAt),
-      ]);
-
-      LegacyCacheHandler.#reporter.success();
-      log("set", cacheKey, "stored");
+      this.reporter.success();
+      raw = value;
+      parseTagFields(requestTags, fields, table);
     } catch (err) {
-      log("set", cacheKey, `error: ${err}`);
-      LegacyCacheHandler.#reporter.failure("set", cacheKey, err);
+      this.#failed("get", cacheKey, err);
+      return this.miss(cacheKey, ctx, isUnavailable(err) ? "unavailable" : "error");
     }
-  }
+    if (!raw) return this.miss(cacheKey, ctx, "absent");
 
-  async revalidateTag(
-    tag: string | string[],
-    _durations?: { expire?: number }
-  ): Promise<void> {
-    await LegacyCacheHandler.#ensureConfigured();
+    let meta: LegacyMeta;
+    let value: unknown;
+    try {
+      ({ meta, value } = await decodeEnvelope<LegacyMeta>(raw));
+    } catch (err) {
+      if (!(err instanceof EnvelopeFormatError)) throw err;
+      cfg.logger.debug(`legacy get ${cacheKey}: unreadable entry (${err.message})`);
+      return this.miss(cacheKey, ctx, "format");
+    }
 
-    const tm = LegacyCacheHandler.#tagManager;
-    if (!tm) return;
-
-    const tags = typeof tag === "string" ? [tag] : tag;
-
-    for (const t of tags) {
+    const entryTags = meta.tags ?? [];
+    const rest = missingTags(entryTags, table);
+    if (rest.length > 0) {
       try {
-        await tm.revalidateTag(t);
-        LegacyCacheHandler.#reporter.success();
-        log("revalidateTag", t, "done");
+        const fields = await this.runner.run("read", (client) => client.hmGet(tagKey, tagFields(rest)) as Promise<unknown[]>);
+        parseTagFields(rest, fields, table);
       } catch (err) {
-        log("revalidateTag", t, `error: ${err}`);
-        LegacyCacheHandler.#reporter.failure("revalidateTag", t, err);
+        // The entry itself was read: without its tag state it is served as it is
+        this.#failed("get", cacheKey, err);
       }
     }
+
+    const now = Date.now();
+    const tags = unique(entryTags, requestTags);
+    const isFetch = ctx.kind === "FETCH" || (value as { kind?: string } | null)?.kind === "FETCH";
+    if (areTagsExpired(tags, table, meta.lastModified, now)) {
+      if (isFetch || cfg.onTagExpired === "miss") {
+        this.#renders.mark(cacheKey, now);
+        cfg.emit({ type: "miss", handler: "legacy", key: cacheKey, reason: "tag" });
+        return null;
+      }
+      return this.#stale(cacheKey, value, now);
+    }
+    if (areTagsStale(tags, table, meta.lastModified)) return this.#stale(cacheKey, value, now);
+
+    // Next regenerates a time-stale entry right after this answer
+    if (typeof meta.revalidate === "number" && now > meta.lastModified + meta.revalidate * 1000) this.#renders.mark(cacheKey, now);
+    cfg.emit({ type: "hit", handler: "legacy", key: cacheKey });
+    return { lastModified: meta.lastModified, value };
   }
 
-  resetRequestCache(): void {
-    // No-op for Redis-based handler
+  #stale(cacheKey: string, value: unknown, now: number): LegacyCacheValue {
+    this.#renders.mark(cacheKey, now);
+    this.cfg.emit({ type: "stale", handler: "legacy", key: cacheKey, reason: "tag" });
+    return { lastModified: -1, value };
   }
+
+  /** A Redis miss (absent, unreadable or unavailable). */
+  async miss(cacheKey: string, _ctx: LegacyGetContext, reason: "absent" | "unavailable" | "error" | "format"): Promise<LegacyCacheValue | null> {
+    this.#renders.mark(cacheKey, Date.now());
+    this.cfg.emit({ type: "miss", handler: "legacy", key: cacheKey, reason });
+    return null;
+  }
+
+  async set(cacheKey: string, data: unknown, ctx: LegacySetContext = {}): Promise<void> {
+    const cfg = this.cfg;
+    const now = Date.now();
+    const lastModified = this.#renders.take(cacheKey, now);
+    if (cfg.isDisabled()) return;
+    const value = data as { kind?: string; headers?: unknown; revalidate?: number | false } | null;
+    const isFetch = value?.kind === "FETCH" || ctx.fetchCache === true;
+    const tags = isFetch ? unique(ctx.tags) : headerTags(value?.headers);
+    const revalidate = isFetch ? value?.revalidate : (ctx.cacheControl?.revalidate ?? ctx.revalidate);
+    await this.write(cacheKey, { lastModified, tags, revalidate }, data, { op: "set" });
+  }
+
+  /** Encodes and stores one entry. Never throws; returns whether Redis took it. */
+  async write(cacheKey: string, meta: LegacyMeta, value: unknown, { op, onlyIfAbsent = false }: { op: string; onlyIfAbsent?: boolean }): Promise<boolean> {
+    const cfg = this.cfg;
+    try {
+      await this.runner.available(); // fail fast, before serializing, while Redis is unavailable
+      const body = await encodeEnvelope(meta, value, cfg.compression);
+      const key = this.key(cacheKey);
+      const ttl = ttlSeconds(cfg, meta.revalidate);
+      const reply = await this.runner.run("write", (client) => client.set(key, body, setOptions(ttl, onlyIfAbsent)));
+      this.reporter.success();
+      if (reply !== null) cfg.emit({ type: "set", handler: "legacy", key: cacheKey, bytes: body.byteLength });
+      return reply !== null;
+    } catch (err) {
+      this.#failed(op, cacheKey, err);
+      return false;
+    }
+  }
+
+  async revalidateTag(tags: string | string[], durations?: { expire?: number }): Promise<void> {
+    const list = unique(typeof tags === "string" ? [tags] : (tags ?? []));
+    if (list.length === 0 || this.cfg.isDisabled()) return;
+    const fields = updateFields(list, durations, Date.now());
+    try {
+      await this.runner.run("write", (client) => client.hSet(tagStateKey(this.cfg.namespace), fields));
+      this.reporter.success();
+    } catch (err) {
+      this.#failed("revalidateTag", list.join(","), err);
+    }
+  }
+}
+
+/**
+ * Creates the legacy cache handler class for `next.config` `cacheHandler`:
+ *
+ * ```js
+ * // cache-handler.mjs
+ * import { createCacheHandler } from "@mirunamu/next-redis-cache";
+ * import { connectRedis } from "@mirunamu/next-redis-cache/redis";
+ * export default createCacheHandler({ client: () => connectRedis(process.env.REDIS_URL), namespace: "my-app" });
+ * ```
+ */
+export function createCacheHandler(config: RedisCacheConfig): LegacyCacheHandlerClass {
+  const core = new LegacyCore(resolveConfig(config));
+  return class RedisCacheHandler implements LegacyCacheHandlerInstance {
+    constructor(ctx?: LegacyHandlerContext) {
+      core.observe(ctx);
+    }
+
+    get(cacheKey: string, ctx?: LegacyGetContext): Promise<LegacyCacheValue | null> {
+      return core.get(cacheKey, ctx);
+    }
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    set(cacheKey: string, data: any, ctx?: LegacySetContext): Promise<void> {
+      return core.set(cacheKey, data, ctx);
+    }
+
+    revalidateTag(tags: string | string[], durations?: { expire?: number }): Promise<void> {
+      return core.revalidateTag(tags, durations);
+    }
+
+    resetRequestCache(): void {
+      // Nothing is cached per request
+    }
+  };
 }

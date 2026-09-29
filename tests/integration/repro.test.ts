@@ -1,21 +1,21 @@
-// Reproductions against real Redis (ROADMAP.md 7-1, 7-4, 7-5, 7-6, 7-9, 7-11, 7-12), once per Redis
-// version under test. Each asserts the correct behavior. `itRepro` marks the ones still expected to
-// fail (tests/support/repro.ts); plain `it` is used for fixed bugs and for behavior 1.0.6 got right.
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
+// Regressions against real Redis (ROADMAP.md 7-1, 7-5, 7-6, 7-9, 7-11, 7-12, A8), once per Redis version
+// under test. Each asserts the correct behavior; the 7-x tests were expected failures on 1.0.6. `itRepro`
+// marks what is still expected to fail (tests/support/repro.ts).
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { redisVersionsUnderTest, startRedisContainer, type RedisServer } from "../support/redis-container";
 import { connectTestClient, type TestRedisClient, type TrackedClient } from "../support/redis";
 import { uniqueNamespace } from "../support/namespace";
 import { waitFor } from "../support/wait-for";
-import { appPageValue, fetchValue, freshInstrumentation, freshLegacy, readEntry, useCacheEntry } from "../support/handlers";
+import { appPageValue, appRouteValue, fetchValue, legacyHandler, readEntry, testConfig, useCacheEntry, useCacheHandler } from "../support/handlers";
 import { itRepro } from "../support/repro";
-import { createUseCacheHandler } from "../../src/use-cache-handler";
+import { cleanupOldBuildKeys } from "../../src/legacy-cleanup";
+import { LegacyCore } from "../../src/legacy-handler";
+import { resolveConfig } from "../../src/config";
+import { decodeEnvelope, encodeEnvelope } from "../../src/envelope";
+import { entryKey } from "../../src/keys";
 
-const FIXTURE_ROOT = fileURLToPath(new URL("../fixtures/next-build/", import.meta.url));
 const YEAR = 365 * 24 * 3600;
+const tick = () => new Promise((r) => setTimeout(r, 5));
 
 describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
   let server: RedisServer;
@@ -33,176 +33,148 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
     await server?.stop();
   });
 
-  /** Shared-hash options used by both handlers, as the README recommends. */
-  const options = (ns: string) => ({
-    client: client as never,
-    keyPrefix: `${ns}:`,
-    sharedTagsKey: "_tags",
-    sharedTagsTtlKey: "_tagTtls",
-    revalidatedTagsKey: "_revalidated",
-  });
+  const nsKeys = async (ns: string) => {
+    const keys: string[] = [];
+    for await (const batch of client.scanIterator({ MATCH: `${ns}:*`, COUNT: 500 })) keys.push(...batch.map(String));
+    return keys.sort();
+  };
 
   describe("7-1 updateTags durations", () => {
     it("[7-1] updateTags without durations expires tagged entries (immediate expiry works)", async () => {
-      const uc = createUseCacheHandler(options(uniqueNamespace()));
+      const { handler: uc } = useCacheHandler({ client: client as never });
       await uc.set("k", Promise.resolve(useCacheEntry({ tags: ["t"], timestamp: Date.now() - 1000 })));
       await uc.updateTags(["t"]);
       expect(await uc.get("k", [])).toBeUndefined();
     });
 
     it("[7-1] an entry written after updateTags(tags, { expire: 1y }) is readable", async () => {
-      const uc = createUseCacheHandler(options(uniqueNamespace()));
+      const { handler: uc } = useCacheHandler({ client: client as never });
       await uc.updateTags(["t"], { expire: YEAR });
-      await new Promise((r) => setTimeout(r, 5));
+      await tick();
       await uc.set("k", Promise.resolve(useCacheEntry({ value: "fresh", tags: ["t"] })));
       expect(await readEntry(await uc.get("k", []))).toBe("fresh");
     });
 
-    it("[7-1] getExpiration after updateTags(tags, { expire }) never reports a future time", async () => {
-      const uc = createUseCacheHandler(options(uniqueNamespace()));
-      await uc.updateTags(["t"], { expire: YEAR });
-      expect(await uc.getExpiration(["t"])).toBeLessThanOrEqual(Date.now());
-    });
-
-    it("[7-1] a legacy entry written after a use-cache updateTags(tags, { expire }) is readable (shared hash)", async () => {
-      const ns = uniqueNamespace();
-      const uc = createUseCacheHandler(options(ns));
-      const { handler } = await freshLegacy(options(ns));
-      await uc.updateTags(["t"], { expire: YEAR });
-      await new Promise((r) => setTimeout(r, 5));
-      await handler.set("/page", appPageValue("<p>fresh</p>", ["t"]), { revalidate: false });
-      expect(await handler.get("/page", { softTags: [] })).not.toBeNull();
-    });
-
-    it("[7-1] a future tag timestamp left by 1.0.x heals: an entry written after the next read is a hit", async () => {
-      const ns = uniqueNamespace();
-      const uc = createUseCacheHandler(options(ns));
-      await client.hSet(`${ns}:_revalidated`, "t", String(Date.now() + YEAR * 1000));
+    it("[7-1] an entry written before updateTags(tags, { expire: 1y }) is served stale once, not dropped", async () => {
+      const { handler: uc } = useCacheHandler({ client: client as never });
       await uc.set("k", Promise.resolve(useCacheEntry({ value: "old", tags: ["t"], timestamp: Date.now() - 1000 })));
-      expect(await uc.get("k", []), "an entry older than the heal stays a miss").toBeUndefined();
-      await new Promise((r) => setTimeout(r, 5));
-      await uc.set("k", Promise.resolve(useCacheEntry({ value: "fresh", tags: ["t"] })));
-      expect(await readEntry(await uc.get("k", []))).toBe("fresh");
-      expect(Number(await client.hGet(`${ns}:_revalidated`, "t"))).toBeLessThanOrEqual(Date.now());
+      await uc.updateTags(["t"], { expire: YEAR });
+      const entry = await uc.get("k", []);
+      expect(entry?.revalidate).toBe(-1);
+      expect(await readEntry(entry)).toBe("old");
+    });
+
+    it("[7-1] a legacy entry written after a use-cache updateTags(tags, { expire }) is fresh (shared tag state)", async () => {
+      const ns = uniqueNamespace();
+      const { handler: uc } = useCacheHandler({ client: client as never, namespace: ns });
+      const { handler } = legacyHandler({ client: client as never, namespace: ns });
+      await uc.updateTags(["t"], { expire: YEAR });
+      await tick();
+      await handler.set("/page", appPageValue("<p>fresh</p>", ["t"]), { cacheControl: { revalidate: false } });
+      expect((await handler.get("/page", { kind: "APP_PAGE" }))?.lastModified).toBeGreaterThan(0);
+    });
+
+    it("[7-1] an invalidation through the legacy handler reaches use-cache entries and vice versa", async () => {
+      const ns = uniqueNamespace();
+      const { handler: uc } = useCacheHandler({ client: client as never, namespace: ns });
+      const { handler } = legacyHandler({ client: client as never, namespace: ns });
+      await uc.set("k", Promise.resolve(useCacheEntry({ tags: ["a"], timestamp: Date.now() - 1000 })));
+      await handler.set("/p", appPageValue("<p>x</p>", ["b"]), {});
+      await tick();
+      await handler.revalidateTag("a");
+      await uc.updateTags(["b"]);
+      expect(await uc.get("k", [])).toBeUndefined();
+      expect((await handler.get("/p", { kind: "APP_PAGE" }))?.lastModified).toBe(-1);
     });
   });
 
-  describe("7-4 prewarm from build output", () => {
-    const prewarm = async (ns: string, root = FIXTURE_ROOT) => {
-      const { registerInitialCache } = await freshInstrumentation();
-      const { Handler } = await freshLegacy(options(ns));
-      const cwd = process.cwd();
-      process.chdir(root);
-      try {
-        return await registerInitialCache(Handler, { setOnlyIfNotExists: true });
-      } finally {
-        process.chdir(cwd);
-      }
-    };
-
-    it("[7-4] prewarms the /about page (baseline)", async () => {
+  describe("7-5 nothing outlives the entries", () => {
+    it("[7-5] expired entries leave no per-entry metadata behind (only the shared tag state stays)", async () => {
       const ns = uniqueNamespace();
-      await prewarm(ns);
-      expect(await client.exists(`${ns}:/about`)).toBe(1);
-    });
-
-    it("[7-4] segment keys match the meta segmentPaths (/_tree, /about/__PAGE__)", async () => {
-      const ns = uniqueNamespace();
-      await prewarm(ns);
-      const stored = JSON.parse((await client.get(`${ns}:/about`))!) as { value: { segmentData: Record<string, string> } };
-      expect(Object.keys(stored.value.segmentData).sort()).toEqual(["/_full", "/_tree", "/about/__PAGE__"]);
-    });
-
-    it("[7-4] the root page is stored under Next's cache key /index", async () => {
-      const ns = uniqueNamespace();
-      await prewarm(ns);
-      expect(await client.exists(`${ns}:/index`)).toBe(1);
-    });
-
-    it("[7-4] APP_ROUTE outputs (dataRoute null, e.g. /icon) are prewarmed", async () => {
-      const ns = uniqueNamespace();
-      await prewarm(ns);
-      expect(await client.exists(`${ns}:/icon`)).toBe(1);
-    });
-
-    it("[7-4] the not-found page is prewarmed and keeps status 404 from its meta", async () => {
-      const ns = uniqueNamespace();
-      await prewarm(ns);
-      const raw = await client.get(`${ns}:/_not-found`);
-      expect(raw, "/_not-found prewarmed").not.toBeNull();
-      expect((JSON.parse(raw!) as { value: { status?: number } }).value.status).toBe(404);
-    });
-
-    it("[7-4] APP_ROUTE entries keep status and headers from their meta", async () => {
-      const ns = uniqueNamespace();
-      await prewarm(ns);
-      const raw = await client.get(`${ns}:/icon`);
-      expect(raw, "/icon prewarmed").not.toBeNull();
-      const { value } = JSON.parse(raw!) as { value: { kind: string; status?: number; headers?: Record<string, string> } };
-      expect(value.kind).toBe("APP_ROUTE");
-      expect(value.status).toBe(200);
-      expect(value.headers?.["content-type"]).toBe("image/png");
-    });
-
-    it("[7-4] a partially prerendered page keeps its postponed state from the meta", async () => {
-      const root = mkdtempSync(path.join(tmpdir(), "nrc-ppr-"));
-      try {
-        cpSync(FIXTURE_ROOT, root, { recursive: true });
-        const metaPath = path.join(root, ".next", "server", "app", "about.meta");
-        writeFileSync(metaPath, JSON.stringify({ ...JSON.parse(readFileSync(metaPath, "utf8")), postponed: "ppr-state" }));
-        const ns = uniqueNamespace();
-        await prewarm(ns, root);
-        const stored = JSON.parse((await client.get(`${ns}:/about`))!) as { value: { postponed?: string } };
-        expect(stored.value.postponed).toBe("ppr-state");
-      } finally {
-        rmSync(root, { recursive: true, force: true });
-      }
-    });
-  });
-
-  describe("7-5 tag metadata lifetime", () => {
-    itRepro("7-5", "tag and TTL hash fields disappear with the entries they describe", async () => {
-      const ns = uniqueNamespace();
-      const { handler } = await freshLegacy(options(ns));
-      // FETCH revalidate=1 -> expire age floor(1.5)=1 -> EX 1 second
-      for (let i = 0; i < 50; i++) await handler.set(`/f${i}`, fetchValue("{}", ["t"], 1), { tags: ["t"], revalidate: 1 });
-      await waitFor(async () => (await client.exists(`${ns}:/f0`)) === 0, { timeout: 4000, message: "entries expired" });
-      await waitFor(async () => (await client.exists(`${ns}:/f49`)) === 0, { timeout: 4000, message: "entries expired" });
-      expect(await client.hLen(`${ns}:_tags`)).toBe(0);
-      expect(await client.hLen(`${ns}:_tagTtls`)).toBe(0);
-    });
-
-    itRepro("7-5", "one corrupted tag field does not stop revalidateTag for the other entries", async () => {
-      const ns = uniqueNamespace();
-      const { handler } = await freshLegacy(options(ns));
-      await client.hSet(`${ns}:_tags`, "/broken", "{not json");
-      await handler.set("/page", appPageValue("<p>x</p>", ["t"]), { revalidate: false });
+      const { handler } = legacyHandler({ client: client as never, namespace: ns, ttl: { estimateExpire: () => 1 } });
+      for (let i = 0; i < 50; i++) await handler.set(`/f${i}`, fetchValue("{}", 1), { fetchCache: true, tags: ["t"] });
       await handler.revalidateTag("t");
-      expect(await handler.get("/page", { softTags: [] })).toBeNull();
+      expect((await nsKeys(ns)).length).toBe(51);
+      await waitFor(async () => (await nsKeys(ns)).length === 1, { timeout: 5000, message: "entries expired" });
+      expect(await nsKeys(ns)).toEqual([`${ns}:_tagstate`]);
+    });
+
+    it("[7-5] a corrupted tag state field does not stop invalidation of other tags", async () => {
+      const ns = uniqueNamespace();
+      const { handler } = legacyHandler({ client: client as never, namespace: ns });
+      await client.hSet(`${ns}:_tagstate`, { "x:broken": "{not a number", "s:t": "garbage" });
+      await handler.set("/page", appPageValue("<p>x</p>", ["broken", "t"]), {});
+      await tick();
+      await handler.revalidateTag("t");
+      expect((await handler.get("/page", { kind: "APP_PAGE" }))?.lastModified).toBe(-1);
+    });
+
+    it("[7-5] every entry key has a TTL", async () => {
+      const ns = uniqueNamespace();
+      const { handler } = legacyHandler({ client: client as never, namespace: ns });
+      const { handler: uc } = useCacheHandler({ client: client as never, namespace: ns });
+      await handler.set("/about", appPageValue(), { cacheControl: { revalidate: false } });
+      await handler.set("/r", appRouteValue(), { cacheControl: { revalidate: 60 } });
+      await uc.set("k", Promise.resolve(useCacheEntry()));
+      await uc.updateTags(["t"]);
+      for (const key of await nsKeys(ns)) {
+        const pttl = await client.pTTL(key);
+        if (key.endsWith(":_tagstate")) expect(pttl).toBe(-1);
+        else expect(pttl, key).toBeGreaterThan(0);
+      }
     });
   });
 
   describe("7-6 legacy revalidateTag semantics", () => {
-    itRepro("7-6", "revalidateTag(tag, { expire }) keeps the entry servable while it is regenerated (SWR)", async () => {
-      const ns = uniqueNamespace();
-      const { handler } = await freshLegacy(options(ns));
-      await handler.set("/page", appPageValue("<p>old</p>", ["t"]), { revalidate: false });
+    it("[7-6] revalidateTag(tag, { expire }) keeps the entry servable while it is regenerated (SWR)", async () => {
+      const { handler } = legacyHandler({ client: client as never });
+      await handler.set("/page", appPageValue("<p>old</p>", ["t"]), { cacheControl: { revalidate: false } });
+      await tick();
       await handler.revalidateTag("t", { expire: 3600 });
-      expect(await handler.get("/page", { softTags: [] })).not.toBeNull();
+      const got = await handler.get("/page", { kind: "APP_PAGE" });
+      expect(got?.lastModified).toBe(-1);
+      expect(got?.value.html).toBe("<p>old</p>");
     });
 
-    itRepro("7-6", "an entry rendered before an explicit-tag invalidation is not served as fresh afterwards", async () => {
+    it("[7-6] an entry rendered across an explicit-tag invalidation is not served as fresh afterwards", async () => {
+      const { handler } = legacyHandler({ client: client as never });
+      expect(await handler.get("/page", { kind: "APP_PAGE" })).toBeNull(); // miss: Next starts rendering
+      await tick();
+      await handler.revalidateTag("t"); // the data changes during the render
+      await tick();
+      await handler.set("/page", appPageValue("<p>old</p>", ["t"]), { cacheControl: { revalidate: false } });
+      expect((await handler.get("/page", { kind: "APP_PAGE" }))?.lastModified).toBe(-1);
+    });
+
+    it("[7-6] revalidateTag deletes nothing: a dynamicParams=false page keeps an answer", async () => {
       const ns = uniqueNamespace();
-      const { handler } = await freshLegacy(options(ns));
-      const renderStarted = Date.now() - 1000;
-      await handler.revalidateTag("t");
-      // A slow render that started before the invalidation finishes and stores its (old) result
-      await handler.set("/page", appPageValue("<p>old</p>", ["t"]), { revalidate: false, internal_lastModified: renderStarted });
-      expect(await handler.get("/page", { softTags: [] })).toBeNull();
+      const { handler } = legacyHandler({ client: client as never, namespace: ns });
+      await handler.set("/pinned/4", appPageValue("<p>v1</p>", ["_N_T_/pinned/4"]), {});
+      await tick();
+      await handler.revalidateTag("_N_T_/pinned/4");
+      expect(await client.exists(entryKey(ns, "b1", "/pinned/4"))).toBe(1);
+      expect((await handler.get("/pinned/4", { kind: "APP_PAGE" }))?.value.html).toBe("<p>v1</p>");
     });
   });
 
-  describe("7-9 cleanupOldBuildKeys", () => {
+  describe("A8 two instances on one Redis", () => {
+    it("[A8] an invalidation on one instance is visible on the other's next read", async () => {
+      const ns = uniqueNamespace();
+      const second = await connectTestClient(server.url);
+      try {
+        const a = useCacheHandler({ client: client as never, namespace: ns }).handler;
+        const b = useCacheHandler({ client: second.client as never, namespace: ns }).handler;
+        await a.set("k", Promise.resolve(useCacheEntry({ value: "shared", tags: ["t"], timestamp: Date.now() - 1000 })));
+        expect(await readEntry(await b.get("k", []))).toBe("shared");
+        await a.updateTags(["t"]);
+        expect(await b.get("k", [])).toBeUndefined();
+      } finally {
+        second.close();
+      }
+    });
+  });
+
+  describe("7-9 cleanupOldBuildKeys (deprecated, 1.x layout)", () => {
     it("[7-9] deletes in batches of at most 500 keys", async () => {
       const ns = uniqueNamespace();
       const multi = client.multi();
@@ -214,7 +186,6 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
         return n("del") + n("unlink");
       };
       const before = await calls();
-      const { cleanupOldBuildKeys } = await freshInstrumentation();
       const { deleted } = await cleanupOldBuildKeys({ redisUrl: server.url, patterns: [{ scan: `${ns}:*`, keepPrefix: `${ns}:new:` }] });
       expect(deleted).toBe(10_000);
       expect((await calls()) - before).toBeGreaterThanOrEqual(20);
@@ -223,7 +194,6 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
     it("[7-9] overlapping patterns delete and count every key once", async () => {
       const ns = uniqueNamespace();
       for (let i = 0; i < 100; i++) await client.set(`${ns}:old:k${i}`, "x", { expiration: { type: "EX", value: 600 } });
-      const { cleanupOldBuildKeys } = await freshInstrumentation();
       const { deleted } = await cleanupOldBuildKeys({ redisUrl: server.url, patterns: [{ scan: `${ns}:*` }, { scan: `${ns}:old:*` }] });
       expect(deleted).toBe(100);
     });
@@ -232,48 +202,57 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       const ns = uniqueNamespace();
       await client.set(`${ns}:A:/page`, "old build, still serving", { expiration: { type: "EX", value: 600 } });
       await client.get(`${ns}:A:/page`); // an old pod read it just now (rolling update in progress)
-      const { cleanupOldBuildKeys } = await freshInstrumentation();
       await cleanupOldBuildKeys({ redisUrl: server.url, patterns: [{ scan: `${ns}:*`, keepPrefix: `${ns}:B:` }] });
       expect(await client.exists(`${ns}:A:/page`)).toBe(1);
     });
   });
 
   describe("7-11 TTL", () => {
-    itRepro("7-11", "APP_ROUTE revalidate=5 (cacheControl) has PTTL of about 7.5s", async () => {
+    it("[7-11] APP_ROUTE revalidate=5 (cacheControl) has PTTL of about 7.5s", async () => {
       const ns = uniqueNamespace();
-      const { handler } = await freshLegacy(options(ns));
-      await handler.set("/api/timed", { kind: "APP_ROUTE", body: Buffer.from("{}"), status: 200, headers: {} }, {
-        cacheControl: { revalidate: 5, expire: undefined },
-      });
-      const pttl = await client.pTTL(`${ns}:/api/timed`);
+      const { handler } = legacyHandler({ client: client as never, namespace: ns });
+      await handler.set("/api/timed", appRouteValue(), { cacheControl: { revalidate: 5, expire: undefined } });
+      const pttl = await client.pTTL(entryKey(ns, "b1", "/api/timed"));
       expect(pttl).toBeGreaterThan(6_000);
       expect(pttl).toBeLessThanOrEqual(7_500);
     });
+
+    it("[7-11] a use-cache entry lives until its expire (remaining lifetime)", async () => {
+      const ns = uniqueNamespace();
+      const { handler } = useCacheHandler({ client: client as never, namespace: ns, buildId: "b1" });
+      await handler.set("k", Promise.resolve(useCacheEntry({ timestamp: Date.now() - 10_000, revalidate: 5, expire: 30 })));
+      const pttl = await client.pTTL(`${ns}:b1:u:k`);
+      expect(pttl).toBeGreaterThan(18_000);
+      expect(pttl).toBeLessThanOrEqual(20_000);
+    });
   });
 
-  describe("7-12 non-atomic writes", () => {
-    itRepro("7-12", "a skipped NX write leaves the existing entry's tag metadata unchanged", async () => {
+  describe("7-12 single-command writes", () => {
+    it("[7-12] a skipped NX write leaves the existing entry (value, tags, TTL) unchanged", async () => {
       const ns = uniqueNamespace();
-      const { handler } = await freshLegacy(options(ns));
-      await handler.set("/page", appPageValue("<p>a</p>", ["a"]), { revalidate: false });
-      await handler.set("/page", appPageValue("<p>b</p>", ["b"]), { revalidate: false, setOnlyIfNotExists: true });
-      expect(JSON.parse((await client.hGet(`${ns}:_tags`, "/page"))!)).toEqual(["a"]);
+      const core = new LegacyCore(resolveConfig(testConfig({ client: client as never, namespace: ns })));
+      await core.write("/page", { lastModified: 1, tags: ["a"], revalidate: false }, appPageValue("<p>a</p>"), { op: "set" });
+      const ttl = await client.pTTL(entryKey(ns, "b1", "/page"));
+      const took = await core.write("/page", { lastModified: 2, tags: ["b"], revalidate: 5 }, appPageValue("<p>b</p>"), { op: "reseed", onlyIfAbsent: true });
+      expect(took).toBe(false);
+      const raw = await client.withTypeMapping({ 36: Buffer }).get(entryKey(ns, "b1", "/page"));
+      const { meta, value } = await decodeEnvelope<{ tags: string[] }>(raw as unknown as Buffer);
+      expect(meta.tags).toEqual(["a"]);
+      expect((value as { html: string }).html).toBe("<p>a</p>");
+      expect(await client.pTTL(entryKey(ns, "b1", "/page"))).toBeLessThanOrEqual(ttl);
     });
 
-    itRepro("7-12", "get does not delete a value whose tag metadata is still being written by another instance", async () => {
+    it("[7-12] get never deletes a value written by another instance", async () => {
       const ns = uniqueNamespace();
-      const { handler } = await freshLegacy(options(ns));
-      // Another pod's SET landed; its HSET of the tag metadata has not yet
-      const stored = { lastModified: Date.now(), value: appPageValue("<p>x</p>"), tags: [], lifespan: null };
-      await client.set(`${ns}:/page`, JSON.stringify({ ...stored, value: { ...stored.value, rscData: "cnNj", segmentData: {} } }), {
-        expiration: { type: "EX", value: 600 },
-      });
-      await handler.get("/page", { softTags: [] });
-      expect(await client.exists(`${ns}:/page`)).toBe(1);
+      const { handler } = legacyHandler({ client: client as never, namespace: ns });
+      const body = await encodeEnvelope({ lastModified: Date.now(), tags: [] }, appPageValue("<p>x</p>"));
+      await client.set(entryKey(ns, "b1", "/page"), body, { expiration: { type: "EX", value: 600 } });
+      expect(await handler.get("/page", { kind: "APP_PAGE" })).not.toBeNull();
+      expect(await client.exists(entryKey(ns, "b1", "/page"))).toBe(1);
     });
 
-    itRepro("7-12", "use-cache get waits for the latest of two overlapping sets on the same key", async () => {
-      const uc = createUseCacheHandler(options(uniqueNamespace()));
+    it("[7-12] use-cache get waits for the latest of two overlapping sets on the same key", async () => {
+      const { handler: uc } = useCacheHandler({ client: client as never });
       let resolveSecond!: (e: ReturnType<typeof useCacheEntry>) => void;
       const first = uc.set("k", Promise.resolve(useCacheEntry({ value: "first" })));
       const second = uc.set("k", new Promise((r) => (resolveSecond = r)));
@@ -285,6 +264,17 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       } finally {
         await second; // never leave a write running past the test (the client closes in afterAll)
       }
+    });
+  });
+
+  describe("binary format on the wire", () => {
+    it("stores raw bytes: a 100 KiB body costs about 100 KiB, not 133 KiB of base64", async () => {
+      const ns = uniqueNamespace();
+      const { handler } = legacyHandler({ client: client as never, namespace: ns });
+      const body = Buffer.alloc(100 * 1024, 1);
+      await handler.set("/bin", { kind: "APP_ROUTE", body, status: 200, headers: {} }, {});
+      expect(await client.strLen(entryKey(ns, "b1", "/bin"))).toBeLessThan(body.byteLength + 512);
+      expect((await handler.get("/bin", { kind: "APP_ROUTE" }))?.value.body.equals(body)).toBe(true);
     });
   });
 });

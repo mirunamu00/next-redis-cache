@@ -1,14 +1,32 @@
-// Contract (types): the legacy handler class must be usable where Next expects its `cacheHandler`
-// class: constructed with CacheHandlerContext, exposing get/set/revalidateTag/resetRequestCache.
-//
-// Expected failures use `// @ts-expect-error [7-x]` (the type-level `it.fails`): once the bug is fixed
-// the directive becomes unused, tsc fails, and the marker must be removed in the fixing commit.
+// Contract (types): the class createCacheHandler returns must be usable where Next expects its `cacheHandler`
+// class: constructed with CacheHandlerContext, exposing get/set/revalidateTag/resetRequestCache with
+// compatible signatures. (1.x declared its own context type with an index signature and failed here, 7-8.)
 import type { CacheHandler, CacheHandlerContext } from "next/dist/server/lib/incremental-cache/index.js";
-import LegacyDefault, { LegacyCacheHandler } from "@mirunamu/next-redis-cache";
+import type { RedisClientType } from "@redis/client";
+import { createCacheHandler, type RedisCacheConfig } from "@mirunamu/next-redis-cache";
+import { connectRedis } from "@mirunamu/next-redis-cache/redis";
 
 type NextCacheHandlerClass = new (ctx: CacheHandlerContext) => Pick<CacheHandler, "get" | "set" | "revalidateTag" | "resetRequestCache">;
 
-// @ts-expect-error [7-8] 1.x declares its own context type (index signature) instead of Next's CacheHandlerContext
-export const named: NextCacheHandlerClass = LegacyCacheHandler;
-// @ts-expect-error [7-8] same class through the default export
-export const byDefault: NextCacheHandlerClass = LegacyDefault;
+declare const client: RedisClientType;
+
+export const withInstance: NextCacheHandlerClass = createCacheHandler({ client, namespace: "app" });
+export const withConnect: NextCacheHandlerClass = createCacheHandler({ client: () => connectRedis(process.env.REDIS_URL), namespace: "app" });
+
+// Every documented option type-checks
+export const full: RedisCacheConfig = {
+  client: null,
+  namespace: "app",
+  buildId: "b1",
+  timeouts: { readMs: 500, writeMs: 1000 },
+  circuitBreaker: { openMs: 5000 },
+  fallback: { buildOutput: true, reseed: false },
+  ttl: { staticSeconds: 3600, maxSeconds: 86400, estimateExpire: (s) => s * 2 },
+  onTagExpired: "miss",
+  compression: "gzip",
+  logger: { warn: console.warn },
+  onEvent: (e) => {
+    if (e.type === "miss") void e.reason;
+  },
+  disabled: () => false,
+};

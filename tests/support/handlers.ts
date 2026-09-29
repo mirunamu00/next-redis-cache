@@ -1,31 +1,32 @@
 /**
  * Helpers to drive the package's handlers directly (unit, fault, integration, contract layers).
- *
- * LegacyCacheHandler keeps its configuration in static fields, so every test gets a fresh copy of
- * the module (vi.resetModules + dynamic import) and never sees another test's configuration.
+ * 2.x handlers keep their state in the factory closure, so every call creates an isolated handler.
  */
-import { vi } from "vitest";
-import type { LegacyHandlerConfig, OnCreationHook } from "../../src/types";
+import { createCacheHandler } from "../../src/legacy-handler";
+import { createUseCacheHandler } from "../../src/use-cache-handler";
+import type { RedisCacheConfig, UseCacheConfig } from "../../src/types";
+import { uniqueNamespace } from "./namespace";
 
-type LegacyModule = typeof import("../../src/legacy-handler");
-export type LegacyHandlerClass = LegacyModule["LegacyCacheHandler"];
-export type LegacyHandler = InstanceType<LegacyHandlerClass>;
+/** Context Next passes to the legacy handler constructor. */
+export const legacyContext = (serverDistDir?: string) => ({ revalidatedTags: [] as string[], _requestHeaders: {}, serverDistDir });
 
-/** Context Next passes to the legacy handler constructor (only the fields 1.x reads). */
-export const legacyContext = () => ({ revalidatedTags: [] as string[], _requestHeaders: {} });
+type TestConfig<C> = Omit<C, "namespace"> & { namespace?: string };
 
-/** A fresh LegacyCacheHandler class with `hook` registered, plus one instance. */
-export async function freshLegacy(hook: OnCreationHook | LegacyHandlerConfig): Promise<{ Handler: LegacyHandlerClass; handler: LegacyHandler }> {
-  vi.resetModules();
-  const { LegacyCacheHandler } = (await import("../../src/legacy-handler")) as LegacyModule;
-  LegacyCacheHandler.onCreation(typeof hook === "function" ? hook : () => hook);
-  return { Handler: LegacyCacheHandler, handler: new LegacyCacheHandler(legacyContext()) };
+/** Defaults for tests: unique namespace, fixed build id, fallback off, enabled even if NEXT_PHASE leaks in. */
+export function testConfig<C extends RedisCacheConfig>(config: TestConfig<C>): C {
+  return { namespace: uniqueNamespace(), buildId: "b1", fallback: false, disabled: false, ...config } as C;
 }
 
-/** A fresh instrumentation module (registerInitialCache / cleanupOldBuildKeys). */
-export async function freshInstrumentation() {
-  vi.resetModules();
-  return import("../../src/instrumentation");
+/** A legacy handler instance (a new class per call: nothing is shared between tests). */
+export function legacyHandler(config: TestConfig<RedisCacheConfig>, serverDistDir?: string) {
+  const cfg = testConfig(config);
+  const Handler = createCacheHandler(cfg);
+  return { Handler, handler: new Handler(legacyContext(serverDistDir)), config: cfg };
+}
+
+export function useCacheHandler(config: TestConfig<UseCacheConfig>) {
+  const cfg = testConfig<UseCacheConfig>(config);
+  return { handler: createUseCacheHandler(cfg), config: cfg };
 }
 
 export interface UseCacheEntryInput {
@@ -73,12 +74,16 @@ export function appPageValue(html = "<html>page</html>", tags: string[] = []) {
   };
 }
 
+/** An APP_ROUTE value (route handler response). */
+export function appRouteValue(body = "{}", headers: Record<string, string> = {}) {
+  return { kind: "APP_ROUTE", body: Buffer.from(body), status: 200, headers };
+}
+
 /** A FETCH value (data cache entry). */
-export function fetchValue(body = "{}", tags: string[] = [], revalidate = 60) {
+export function fetchValue(body = "{}", revalidate = 60) {
   return {
     kind: "FETCH",
     data: { headers: {}, body: Buffer.from(body).toString("base64"), status: 200, url: "http://origin/x" },
-    tags,
     revalidate,
   };
 }

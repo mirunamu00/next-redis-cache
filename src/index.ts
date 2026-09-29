@@ -1,8 +1,21 @@
-export { LegacyCacheHandler } from "./legacy-handler";
-export { LegacyCacheHandler as default } from "./legacy-handler";
+export { createCacheHandler } from "./legacy-handler";
 export type {
-  LegacyHandlerConfig,
-  OnCreationHook,
-  RedisHandlerOptions,
-  ResolvedRedisOptions,
+  AnyRedisClient,
+  CacheEvent,
+  CircuitBreakerOptions,
+  ClientSource,
+  Compression,
+  FallbackOptions,
+  HandlerName,
+  LegacyCacheHandlerClass,
+  LegacyCacheHandlerInstance,
+  LegacyCacheValue,
+  LegacyGetContext,
+  LegacyHandlerContext,
+  LegacySetContext,
+  Logger,
+  LogLevel,
+  RedisCacheConfig,
+  TimeoutOptions,
+  TtlOptions,
 } from "./types";

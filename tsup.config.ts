@@ -5,6 +5,7 @@ export default defineConfig({
     index: "src/index.ts",
     "use-cache": "src/use-cache.ts",
     instrumentation: "src/instrumentation.ts",
+    redis: "src/redis-entry.ts",
   },
   format: ["esm", "cjs"],
   dts: true,
@@ -13,7 +14,7 @@ export default defineConfig({
   outDir: "dist",
   // Build-only config that sees src/ only, so tests and config files never leak into the .d.ts output
   tsconfig: "tsconfig.build.json",
-  target: "node18",
+  target: "node20",
   external: ["next", "@redis/client"],
   treeshake: true,
 });

@@ -1,7 +1,8 @@
-// Transition-based error reporting (ROADMAP.md 7-7): one warning per outage, a summary at most once a
+// Transition-based failure logging (ROADMAP.md 7-7, D13): one warning per outage, a summary at most once a
 // minute while it lasts, one recovery message.
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { ErrorReporter } from "../../src/error-reporter";
+import { FailureReporter, reportFailure, resolveLogger } from "../../src/logger";
+import { RedisTimeoutError, RedisUnavailableError } from "../../src/runner";
 
 let warn: ReturnType<typeof vi.spyOn>;
 let info: ReturnType<typeof vi.spyOn>;
@@ -17,9 +18,11 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("ErrorReporter", () => {
+const reporter = (label: string) => new FailureReporter(label, resolveLogger(undefined));
+
+describe("FailureReporter", () => {
   it("stays silent while everything succeeds", () => {
-    const r = new ErrorReporter("test");
+    const r = reporter("test");
     r.success();
     r.success();
     expect(warn).not.toHaveBeenCalled();
@@ -27,14 +30,15 @@ describe("ErrorReporter", () => {
   });
 
   it("warns on the first failure with the operation, key and reason", () => {
-    const r = new ErrorReporter("use-cache");
+    const r = reporter("use-cache");
     r.failure("get", "k1", new Error("boom"));
     expect(warn).toHaveBeenCalledTimes(1);
     expect(String(warn.mock.calls[0]?.[0])).toMatch(/\[next-redis-cache\] use-cache get failed \(k1\): boom/);
+    expect(r.failing).toBe(true);
   });
 
   it("summarizes further failures at most once per minute", () => {
-    const r = new ErrorReporter("legacy");
+    const r = reporter("legacy");
     r.failure("get", "k", new Error("down"));
     for (let i = 0; i < 100; i++) r.failure("get", `k${i}`, new Error("down"));
     expect(warn).toHaveBeenCalledTimes(1);
@@ -45,7 +49,7 @@ describe("ErrorReporter", () => {
   });
 
   it("reports the recovery once and warns again on the next outage", () => {
-    const r = new ErrorReporter("legacy");
+    const r = reporter("legacy");
     r.failure("get", "k", "string reason");
     r.failure("get", "k", "string reason");
     r.success();
@@ -57,8 +61,29 @@ describe("ErrorReporter", () => {
   });
 
   it("shortens very long cache keys", () => {
-    const r = new ErrorReporter("use-cache");
-    r.failure("get", "x".repeat(500), new Error("e"));
+    reporter("use-cache").failure("get", "x".repeat(500), new Error("e"));
     expect(String(warn.mock.calls[0]?.[0]).length).toBeLessThan(300);
+  });
+});
+
+describe("reportFailure", () => {
+  it("does not treat an intentionally absent client or a disabled handler as a failure", () => {
+    const r = reporter("legacy");
+    const emit = vi.fn();
+    reportFailure(r, { emit }, "legacy", "get", "k", new RedisUnavailableError("no-client"));
+    reportFailure(r, { emit }, "legacy", "get", "k", new RedisUnavailableError("disabled"));
+    expect(warn).not.toHaveBeenCalled();
+    expect(emit).not.toHaveBeenCalled();
+  });
+
+  it("logs unavailability without an error event, and emits real errors", () => {
+    const r = reporter("legacy");
+    const emit = vi.fn();
+    reportFailure(r, { emit }, "legacy", "get", "k", new RedisUnavailableError("not-ready"));
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(emit).not.toHaveBeenCalled();
+    const err = new RedisTimeoutError(5);
+    reportFailure(r, { emit }, "legacy", "set", "k", err);
+    expect(emit).toHaveBeenCalledWith({ type: "error", handler: "legacy", op: "set", key: "k", error: err });
   });
 });

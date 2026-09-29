@@ -1,49 +1,25 @@
-// Reproductions that need no network (ROADMAP.md 7-7, 7-8, 7-10, 7-11, 7-13). Each asserts the correct
-// behavior; `itRepro` marks the ones still expected to fail (tests/support/repro.ts), plain `it` the fixed ones.
+// Regression tests that need no network (ROADMAP.md 7-7, 7-8, 7-10, 7-11, 7-13). Each asserts the correct
+// behavior; they were expected failures on 1.0.6 (`itRepro`) and are plain tests since the fixing release.
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { withTimeout } from "../../src/redis-client";
-import { createUseCacheHandler } from "../../src/use-cache-handler";
-import { freshLegacy, useCacheEntry } from "../support/handlers";
-import { itRepro } from "../support/repro";
+import { withTimeout } from "../../src/runner";
+import { LegacyCore } from "../../src/legacy-handler";
+import { resolveConfig } from "../../src/config";
+import { fakeRedis, type FakeCall } from "../support/fake-redis";
+import { legacyHandler, testConfig, useCacheEntry, useCacheHandler } from "../support/handlers";
 
 const repoFile = (p: string) => readFileSync(new URL(`../../${p}`, import.meta.url), "utf8");
-
-interface Call {
-  cmd: string;
-  args: unknown[];
-}
-
-/** Records commands; every command succeeds. Enough for code paths that only write. */
-function recordingClient() {
-  const calls: Call[] = [];
-  const record =
-    (cmd: string, result: unknown = null) =>
-    (...args: unknown[]) => {
-      calls.push({ cmd, args });
-      return Promise.resolve(result);
-    };
-  const client = {
-    isReady: true,
-    isOpen: true,
-    get: record("get"),
-    set: record("set", "OK"),
-    hSet: record("hSet", 1),
-    hExists: record("hExists", 1),
-    hmGet: (_k: string, fields: string[]) => {
-      calls.push({ cmd: "hmGet", args: [_k, fields] });
-      return Promise.resolve(fields.map(() => null));
-    },
-    unlink: record("unlink", 1),
-  };
-  return { client, calls };
-}
 
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
 });
+
+const ttlOf = (calls: FakeCall[]) => {
+  const set = calls.find((c) => c.cmd === "set");
+  return (set?.args[2] as { expiration?: { value: number } } | undefined)?.expiration?.value;
+};
 
 describe("7-7 error reporting", () => {
   const consoleSpies = () => ({
@@ -52,13 +28,13 @@ describe("7-7 error reporting", () => {
   });
 
   it("[7-7] use-cache: an outage is warned about once (not per request) and the recovery is reported", async () => {
-    const { client } = recordingClient();
+    const { fake, client } = fakeRedis();
     const { warn, info } = consoleSpies();
-    const handler = createUseCacheHandler({ client: client as never, keyPrefix: "t:" });
-    client.isReady = false;
+    const { handler } = useCacheHandler({ client });
+    fake.isReady = false;
     for (let i = 0; i < 20; i++) expect(await handler.get(`k${i}`, [])).toBeUndefined();
     expect(warn).toHaveBeenCalledTimes(1);
-    client.isReady = true;
+    fake.isReady = true;
     await handler.get("k", []);
     await handler.get("k", []);
     expect(info).toHaveBeenCalledTimes(1);
@@ -66,20 +42,21 @@ describe("7-7 error reporting", () => {
   });
 
   it("[7-7] legacy: failing sets are warned about once until Redis recovers", async () => {
-    const { client } = recordingClient();
+    const { fake, client } = fakeRedis();
     const { warn, info } = consoleSpies();
-    const { handler } = await freshLegacy({ client: client as never, keyPrefix: "t:" });
-    client.isReady = false;
-    for (let i = 0; i < 20; i++) await handler.set(`/p${i}`, { kind: "FETCH", data: { headers: {}, body: "e30=", status: 200 }, revalidate: 60 }, { tags: [] });
+    const { handler } = legacyHandler({ client });
+    fake.isReady = false;
+    const data = { kind: "FETCH", data: { headers: {}, body: "e30=", status: 200 }, revalidate: 60 };
+    for (let i = 0; i < 20; i++) await handler.set(`/p${i}`, data, { tags: [] });
     expect(warn).toHaveBeenCalledTimes(1);
-    client.isReady = true;
-    await handler.set("/p", { kind: "FETCH", data: { headers: {}, body: "e30=", status: 200 }, revalidate: 60 }, { tags: [] });
+    fake.isReady = true;
+    await handler.set("/p", data, { tags: [] });
     expect(info).toHaveBeenCalledTimes(1);
   });
 });
 
 describe("7-8 declared compatibility", () => {
-  itRepro("7-8", "the next peer range does not admit Next 15 (not supported, Q2)", () => {
+  it("[7-8] the next peer range does not admit Next 15 (not supported, Q2)", () => {
     const peer = JSON.parse(repoFile("package.json")).peerDependencies.next as string;
     const lowestMajor = Number(/(\d+)/.exec(peer)?.[1]);
     expect(lowestMajor).toBeGreaterThanOrEqual(16);
@@ -95,48 +72,46 @@ describe("7-10 timeout timers", () => {
 });
 
 describe("7-11 TTL policy", () => {
-  const ttlOf = (calls: Call[]) => {
-    const set = calls.find((c) => c.cmd === "set");
-    return (set?.args[2] as { EX?: number } | undefined)?.EX;
-  };
-
-  itRepro("7-11", "APP_ROUTE with cacheControl.revalidate=5 gets a TTL of about 7.5s", async () => {
-    const { client, calls } = recordingClient();
-    const { handler } = await freshLegacy({ client: client as never, keyPrefix: "t:" });
+  it("[7-11] APP_ROUTE with cacheControl.revalidate=5 gets a TTL of about 7.5s", async () => {
+    const { fake, client } = fakeRedis();
+    const { handler } = legacyHandler({ client });
     await handler.set("/api/timed", { kind: "APP_ROUTE", body: Buffer.from("{}"), status: 200, headers: {} }, {
       cacheControl: { revalidate: 5, expire: undefined },
     });
-    expect(ttlOf(calls)).toBeGreaterThan(0);
-    expect(ttlOf(calls)).toBeLessThanOrEqual(8);
+    expect(ttlOf(fake.calls)).toBeGreaterThan(0);
+    expect(ttlOf(fake.calls)).toBeLessThanOrEqual(8);
   });
 
-  itRepro("7-11", "a static entry (revalidate false) is capped at 30 days, not 1.5 years", async () => {
-    const { client, calls } = recordingClient();
-    const { handler } = await freshLegacy({ client: client as never, keyPrefix: "t:" });
+  it("[7-11] a static entry (revalidate false) is capped at 30 days, not 1.5 years", async () => {
+    const { fake, client } = fakeRedis();
+    const { handler } = legacyHandler({ client });
     await handler.set("/about", { kind: "APP_PAGE", html: "x", rscData: Buffer.from("r"), headers: {}, status: 200 }, {
       cacheControl: { revalidate: false, expire: undefined },
     });
-    expect(ttlOf(calls)).toBeLessThanOrEqual(30 * 24 * 3600);
+    expect(ttlOf(fake.calls)).toBeLessThanOrEqual(30 * 24 * 3600);
   });
 
-  itRepro("7-11", "re-seeding an entry built long ago stores it (TTL counts from the write)", async () => {
-    const { client, calls } = recordingClient();
-    const { handler } = await freshLegacy({ client: client as never, keyPrefix: "t:", defaultStaleAge: 3600 });
+  it("[7-11] re-seeding an entry built long ago stores it (TTL counts from the write)", async () => {
+    const { fake, client } = fakeRedis();
+    const core = new LegacyCore(resolveConfig(testConfig({ client, ttl: { staticSeconds: 3600 } })));
     const twoDaysAgo = Date.now() - 2 * 24 * 3600 * 1000;
-    await handler.set("/old", { kind: "APP_PAGE", html: "x", rscData: Buffer.from("r"), headers: {}, status: 200 }, {
-      revalidate: false,
-      internal_lastModified: twoDaysAgo,
-    });
-    expect(calls.some((c) => c.cmd === "set")).toBe(true);
+    const stored = await core.write(
+      "/old",
+      { lastModified: twoDaysAgo, tags: [], revalidate: false },
+      { kind: "APP_PAGE", html: "x", rscData: Buffer.from("r"), headers: {}, status: 200 },
+      { op: "reseed", onlyIfAbsent: true },
+    );
+    expect(stored).toBe(true);
+    expect(ttlOf(fake.calls)).toBe(3600);
   });
 });
 
 describe("7-13 README and defaults", () => {
-  itRepro("7-13", "the default use-cache key prefix stays inside keyPrefix", async () => {
-    const { client, calls } = recordingClient();
-    const handler = createUseCacheHandler({ client: client as never, keyPrefix: "app:b1:" });
+  it("[7-13] the default use-cache key stays inside the namespace", async () => {
+    const { fake, client } = fakeRedis();
+    const { handler } = useCacheHandler({ client, namespace: "app", buildId: "b1" });
     await handler.set("k", Promise.resolve(useCacheEntry()));
-    const key = calls.find((c) => c.cmd === "set")?.args[0] as string;
+    const key = fake.calls.find((c) => c.cmd === "set")?.args[0] as string;
     expect(key.startsWith("app:b1:")).toBe(true);
   });
 
@@ -155,7 +130,6 @@ describe("7-13 README and defaults", () => {
   });
 
   it("[7-13] README does not promise that every Redis call has a timeout", () => {
-    // cleanupOldBuildKeys connects without a timeout (7-2/7-9), so the blanket claim is false
     expect(repoFile("README.md")).not.toMatch(/Every Redis (call|operation) is wrapped in a (configurable )?timeout/);
   });
 });

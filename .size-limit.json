@@ -1,26 +1,32 @@
 [
   {
-    "name": "ESM entry '.' (index + shared chunk, gzip)",
+    "name": "ESM entry '.' (index + shared chunks, gzip)",
     "path": ["dist/index.js", "dist/chunk-*.js"],
-    "limit": "6.6 kB",
+    "limit": "11.5 kB",
     "gzip": true
   },
   {
-    "name": "ESM entry './use-cache' (use-cache + shared chunk, gzip)",
+    "name": "ESM entry './use-cache' (use-cache + shared chunks, gzip)",
     "path": ["dist/use-cache.js", "dist/chunk-*.js"],
-    "limit": "5.4 kB",
+    "limit": "11.3 kB",
     "gzip": true
   },
   {
-    "name": "ESM entry './instrumentation' (gzip)",
-    "path": ["dist/instrumentation.js"],
-    "limit": "2.1 kB",
+    "name": "ESM entry './instrumentation' (instrumentation + shared chunks, gzip)",
+    "path": ["dist/instrumentation.js", "dist/chunk-*.js"],
+    "limit": "10.4 kB",
+    "gzip": true
+  },
+  {
+    "name": "ESM entry './redis' (gzip)",
+    "path": ["dist/redis.js"],
+    "limit": "1.3 kB",
     "gzip": true
   },
   {
     "name": "CJS total (dist/*.cjs, gzip)",
     "path": "dist/*.cjs",
-    "limit": "10.8 kB",
+    "limit": "16.7 kB",
     "gzip": true
   }
 ]

@@ -1,9 +1,8 @@
-// Contract (types): the instrumentation entry point keeps its 1.x call shapes (+ timeoutMs since 1.1.0).
-import { cleanupOldBuildKeys, registerInitialCache } from "@mirunamu/next-redis-cache/instrumentation";
-import { LegacyCacheHandler } from "@mirunamu/next-redis-cache";
+// Contract (types): the instrumentation entry point.
+import { cleanupOldBuildKeys } from "@mirunamu/next-redis-cache/instrumentation";
 
 export async function contract(): Promise<void> {
-  const { prewarmed } = await registerInitialCache(LegacyCacheHandler, { setOnlyIfNotExists: true });
+  // deprecated 1.x cleanup, still available in 2.x
   const { deleted } = await cleanupOldBuildKeys({ redisUrl: "redis://127.0.0.1:6379", patterns: [{ scan: "app:*", keepPrefix: "app:b1:" }], timeoutMs: 2000 });
-  void [prewarmed, deleted];
+  void deleted;
 }

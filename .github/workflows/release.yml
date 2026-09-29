@@ -85,4 +85,5 @@ jobs:
         env:
           # changelog-github (changeset version) and the release PR need it; not an npm credential
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # npm auth is trusted publishing (OIDC) only; no npm token is used. Provenance comes from id-token: write.
           NPM_CONFIG_PROVENANCE: "true"

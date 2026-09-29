@@ -165,7 +165,20 @@ describe("use-cache handler vs Next's default handler", () => {
 
   // Fixed in 2.0 (7-1): the shared tag state keeps Next's stale and expired time per tag, so an older entry
   // is served stale once (revalidate -1), and implicit tags follow the wrapper's getExpiration rule inside get().
+  // The fixed program always shows the difference 1.x had (reference k0=stale:v1, 1.x k0=miss).
   it("[7-1] agrees when tags are revalidated with durations (revalidateTag(tag, profile))", async () => {
+    const ops: Op[] = [
+      { op: "set", key: "k0", tags: ["t0"], revalidate: 100, expireFactor: 10 },
+      { op: "advance", ms: 1_000 },
+      { op: "updateTags", tags: ["t0"], expire: 60 },
+      { op: "get", key: "k0", softTags: [] },
+    ];
+    const { reference, ours } = await differential(ops);
+    expect(reference).toEqual(["k0=stale:v1"]);
+    expect(ours).toEqual(reference);
+  });
+
+  it("agrees on random programs with durations (revalidateTag(tag, profile))", async () => {
     let stale = 0;
     await fc.assert(
       fc.asyncProperty(program(true), async (ops) => {

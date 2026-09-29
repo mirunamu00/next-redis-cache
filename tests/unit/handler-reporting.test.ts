@@ -22,7 +22,7 @@ function fakeClient() {
     get: vi.fn(() => Promise.resolve(null)),
     set: vi.fn(() => Promise.resolve("OK")),
     hSet: vi.fn(() => Promise.resolve(1)),
-    hmGet: vi.fn((_k: string, fields: string[]) => Promise.resolve(fields.map(() => null))),
+    hmGet: vi.fn((_k: string, fields: string[]) => Promise.resolve(fields.map((): string | null => null))),
   };
 }
 
@@ -53,5 +53,20 @@ describe("use-cache handler error reporting", () => {
     expect(await handler.getExpiration([])).toBe(0);
     await handler.updateTags([]);
     expect(info).not.toHaveBeenCalled();
+  });
+});
+
+describe("healing a future tag time left by 1.0.x (7-1)", () => {
+  it("is best effort: a failing rewrite does not fail the read", async () => {
+    const client = fakeClient();
+    const future = String(Date.now() + 365 * 24 * 3600 * 1000);
+    client.hmGet.mockImplementation((_k: string, fields: string[]) => Promise.resolve(fields.map(() => future)));
+    client.hSet.mockImplementation(() => Promise.reject(new Error("READONLY You can't write against a read only replica")));
+    const handler = createUseCacheHandler({ client: client as never, keyPrefix: "t:" });
+    const expiration = await handler.getExpiration(["t"]);
+    expect(expiration).toBeGreaterThan(Date.now() - 1000);
+    expect(expiration).toBeLessThanOrEqual(Date.now());
+    expect(client.hSet).toHaveBeenCalledTimes(1);
+    expect(warn).not.toHaveBeenCalled();
   });
 });

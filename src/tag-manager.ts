@@ -78,8 +78,9 @@ export class TagManager {
   /**
    * Revalidation times (ms, 0 = never) of `tags`. A future time left by 1.0.x is healed: it is
    * treated as "revalidated now" and rewritten as such, so the tag works normally again after one
-   * regeneration instead of missing until that future time. (A concurrent updateTags between the
-   * read and the rewrite can be moved back by the few milliseconds in between.)
+   * regeneration instead of missing until that future time. The rewrite is best effort and not
+   * awaited: if it fails (read-only replica, timeout) the read still uses `now`. (A concurrent
+   * updateTags between the read and the rewrite can be moved back by the milliseconds in between.)
    */
   private async revalidationTimes(tags: string[]): Promise<number[]> {
     const raw = await this.exec(
@@ -97,7 +98,9 @@ export class TagManager {
       return t;
     });
     if (Object.keys(healed).length > 0) {
-      await this.exec(() => this.client.hSet(this.revalidatedTagsKey, healed));
+      void this.exec(() =>
+        this.client.hSet(this.revalidatedTagsKey, healed)
+      ).catch(() => undefined);
     }
     return times;
   }

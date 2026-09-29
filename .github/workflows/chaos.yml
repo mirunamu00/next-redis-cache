@@ -1,8 +1,9 @@
 # Chaos layer (ROADMAP.md section 6.5): fleets of standalone test-app builds against docker compose
 # Redis + toxiproxy. Reusable: nightly runs every scenario, release runs the required subset.
-# Known-bug reproductions are expected failures (it.fails), so a green run means "no new breakage".
-# Since 1.1.0 C2/C5 (7-3) are regular tests; C1/C9 (7-2), C6/C13 (7-6) and C11/C12 (7-9) stay expected
-# failures until P2/P4. The release gate runs startup + rolling (C1, C9, C11, C12).
+# Every scenario C1..C14 is a regular test since 2.0 (no expected failures left): startup (C1, C9),
+# outage (C2, C5), degraded (C3, C4, C10), data-loss (C6, C13), persistence (C8, prodlike AOF restart),
+# pressure (C7 eviction on prodlike, C14 clock skew), rolling (C11, C12). The release gate runs startup,
+# rolling, degraded and pressure.
 name: Chaos
 
 on:

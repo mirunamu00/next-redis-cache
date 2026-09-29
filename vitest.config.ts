@@ -14,6 +14,9 @@ const isCI = Boolean(process.env.CI);
 const blob = process.env.NRC_BLOB;
 const reporters: Array<string | [string, Record<string, unknown>]> = ["default"];
 if (isCI) reporters.push(["junit", { outputFile: "reports/junit.xml" }]);
+// On GitHub Actions every failure also becomes a check-run annotation (file, line, test name, assertion
+// message). Annotations are readable through the public API without auth, job logs are not.
+if (process.env.GITHUB_ACTIONS) reporters.push("github-actions");
 if (blob) reporters.push(["blob", { outputFile: `reports/blob/${blob}.json` }]);
 
 export default defineConfig({

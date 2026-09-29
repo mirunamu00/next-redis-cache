@@ -23,8 +23,14 @@ export default defineConfig({
   grep: quarantineOnly ? /@quarantine/ : undefined,
   grepInvert: quarantineOnly ? undefined : /@quarantine/,
   outputDir: "test-results/e2e",
+  // "github" turns failures into check-run annotations (public API, no auth needed - unlike job logs)
   reporter: isCI
-    ? [["list"], ["html", { open: "never", outputFolder: "reports/playwright" }], ["junit", { outputFile: "reports/e2e-junit.xml" }]]
+    ? [
+        ["list"],
+        ["html", { open: "never", outputFolder: "reports/playwright" }],
+        ["junit", { outputFile: "reports/e2e-junit.xml" }],
+        ...(process.env.GITHUB_ACTIONS ? ([["github"]] as const) : []),
+      ]
     : [["list"]],
   use: { trace: "retain-on-failure" },
   projects: [

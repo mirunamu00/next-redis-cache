@@ -1,0 +1,19 @@
+1:"$Sreact.fragment"
+2:I[22016,["/_next/static/chunks/22i43cg4l4-dq.js"],""]
+3:I[97367,["/_next/static/chunks/3fntmmi971322.js"],"OutletBoundary"]
+4:"$Sreact.suspense"
+8:I[97367,["/_next/static/chunks/3fntmmi971322.js"],"ViewportBoundary"]
+9:I[97367,["/_next/static/chunks/3fntmmi971322.js"],"MetadataBoundary"]
+a:I[27201,["/_next/static/chunks/3fntmmi971322.js"],"IconMark"]
+c:I[39756,["/_next/static/chunks/3fntmmi971322.js"],"default"]
+d:I[37457,["/_next/static/chunks/3fntmmi971322.js"],"default"]
+7:X
+0:{"buildId":"A","data":[{"rsc":["$","$1","c",{"children":[["$","main",null,{"children":[["$","h1",null,{"children":"static-site"}],["$","p",null,{"id":"page","children":"home"}],["$","ul",null,{"children":[["$","li","guide/doc-0",{"children":["$","$L2",null,{"href":"/docs/guide/doc-0","children":"guide/doc-0"}]}],["$","li","reference/doc-1",{"children":["$","$L2",null,{"href":"/docs/reference/doc-1","children":"reference/doc-1"}]}],["$","li","tutorial/doc-2",{"children":["$","$L2",null,{"href":"/docs/tutorial/doc-2","children":"tutorial/doc-2"}]}],["$","li","ops/doc-3",{"children":["$","$L2",null,{"href":"/docs/ops/doc-3","children":"ops/doc-3"}]}],["$","li","api/section-1/doc-4",{"children":["$","$L2",null,{"href":"/docs/api/section-1/doc-4","children":"api/section-1/doc-4"}]}],["$","li","concepts/doc-5",{"children":["$","$L2",null,{"href":"/docs/concepts/doc-5","children":"concepts/doc-5"}]}],["$","li","guide/doc-6",{"children":["$","$L2",null,{"href":"/docs/guide/doc-6","children":"guide/doc-6"}]}],["$","li","reference/doc-7",{"children":["$","$L2",null,{"href":"/docs/reference/doc-7","children":"reference/doc-7"}]}],["$","li","tutorial/doc-8",{"children":["$","$L2",null,{"href":"/docs/tutorial/doc-8","children":"tutorial/doc-8"}]}],["$","li","ops/section-0/doc-9",{"children":["$","$L2",null,{"href":"/docs/ops/section-0/doc-9","children":"ops/section-0/doc-9"}]}]]}],["$","$L2",null,{"href":"/about","children":"about"}]]}],[["$","script","script-0",{"src":"/_next/static/chunks/22i43cg4l4-dq.js","async":true}]],["$","$L3",null,{"children":["$","$4",null,{"name":"Next.MetadataOutlet","children":"$@5"}]}]]}],"isPartial":"$@6","staleTime":"$7","varyParams":null},{"rsc":["$","$1","h",{"children":[null,["$","$L8",null,{"children":[["$","meta","0",{"charSet":"utf-8"}],["$","meta","1",{"name":"viewport","content":"width=device-width, initial-scale=1"}]]}],["$","div",null,{"hidden":true,"children":["$","$L9",null,{"children":["$","$4",null,{"name":"Next.Metadata","children":[["$","title","0",{"children":"nrc static-site"}],["$","link","1",{"rel":"icon","href":"/icon?58ae750a53fbbcb3","type":"image/png","sizes":"32x32"}],["$","$La","2",{}]]}]}]}],null]}],"isPartial":"$@b","staleTime":"$7","varyParams":null},{"rsc":["$","$1","c",{"children":[null,["$","html",null,{"lang":"en","children":["$","body",null,{"children":[["$","div",null,{"id":"nrc-test","hidden":true,"data-build":"A","data-render-id":"639b1ea2-490b-4682-a682-b47c23a65c18","data-rendered-at":"1790651929527","data-instance":"build"}],["$","$Lc",null,{"parallelRouterKey":"children","template":["$","$Ld",null,{}],"notFound":[["$","main",null,{"children":[["$","h1",null,{"children":"Not found"}],["$","p",null,{"id":"page","children":"not-found"}]]}],[]]}]]}]}]]}],"isPartial":"$@e","staleTime":"$7","varyParams":null}],"isUpgradeableISRFallback":false,"a":"$@f","rootVaryParams":null,"needsRuntimeRequest":"$@10"}
+5:null
+7:300
+10:true
+7:C
+f:0
+b:"$undefined"
+e:"$undefined"
+6:"$undefined"

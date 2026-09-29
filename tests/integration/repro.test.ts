@@ -211,13 +211,13 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
       expect(pttl).toBeLessThanOrEqual(7_500);
     });
 
-    it("[7-11] a use-cache entry lives until its expire (remaining lifetime)", async () => {
+    it("[7-11] a use-cache entry lives until its expire (remaining lifetime + 1 s)", async () => {
       const ns = uniqueNamespace();
       const { handler } = useCacheHandler({ client: client as never, namespace: ns, buildId: "b1" });
       await handler.set("k", Promise.resolve(useCacheEntry({ timestamp: Date.now() - 10_000, revalidate: 5, expire: 30 })));
       const pttl = await client.pTTL(`${ns}:b1:u:k`);
-      expect(pttl).toBeGreaterThan(18_000);
-      expect(pttl).toBeLessThanOrEqual(20_000);
+      expect(pttl).toBeGreaterThan(19_000);
+      expect(pttl).toBeLessThanOrEqual(21_000);
     });
   });
 

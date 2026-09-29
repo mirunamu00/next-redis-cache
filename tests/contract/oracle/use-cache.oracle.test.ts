@@ -148,6 +148,26 @@ async function differential(ops: Op[]): Promise<{ reference: string[]; ours: str
 }
 
 describe("use-cache handler vs Next's default handler", () => {
+  // Random programs reach an exact boundary only rarely (a flaky mismatch): pin them. At ts + revalidate the
+  // entry is still a hit for Next, so the Redis key must not expire at that same millisecond.
+  it("agrees exactly at the revalidate and expire boundaries", async () => {
+    const ops: Op[] = [
+      { op: "set", key: "k0", tags: [], revalidate: 1, expireFactor: 1 },
+      { op: "set", key: "k1", tags: [], revalidate: 10, expireFactor: 2 },
+      { op: "advance", ms: 1_000 },
+      { op: "get", key: "k0", softTags: [] },
+      { op: "advance", ms: 1 },
+      { op: "get", key: "k0", softTags: [] },
+      { op: "advance", ms: 8_999 },
+      { op: "get", key: "k1", softTags: [] },
+      { op: "advance", ms: 1 },
+      { op: "get", key: "k1", softTags: [] },
+    ];
+    const { reference, ours } = await differential(ops);
+    expect(reference).toEqual(["k0=hit:v1", "k0=miss", "k1=hit:v2", "k1=miss"]);
+    expect(ours).toEqual(reference);
+  });
+
   it("agrees on hits and misses when tags are expired immediately (updateTags without durations)", async () => {
     const seen = { hit: 0, miss: 0 };
     await fc.assert(

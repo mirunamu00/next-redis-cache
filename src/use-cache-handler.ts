@@ -190,7 +190,9 @@ export function createUseCacheHandler(config: UseCacheConfig): UseCacheHandler {
         const lifetimeSeconds = swr ? entry.expire : Math.min(entry.expire, entry.revalidate);
         const remainingMs = lifetimeSeconds * 1000 - (Date.now() - entry.timestamp);
         if (!(remainingMs > 0)) return; // already expired: nothing worth storing
-        const ttl = Math.max(1, Math.min(Math.ceil(remainingMs / 1000), Math.floor(cfg.maxSeconds)));
+        // One second beyond the lifetime: at exactly timestamp + lifetime the entry is still valid for Next,
+        // so the key must not be gone yet (get() applies the exact boundary itself)
+        const ttl = Math.max(1, Math.min(Math.ceil(remainingMs / 1000) + 1, Math.floor(cfg.maxSeconds)));
         const meta: UseCacheMeta = {
           tags: entry.tags ?? [],
           stale: entry.stale,

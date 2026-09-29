@@ -33,7 +33,7 @@ describe("get / set", () => {
     const { fake, handler } = setup();
     await handler.set("k", Promise.resolve(useCacheEntry({ timestamp: T0 - 20_000, revalidate: 10, expire: 100 })));
     const opts = fake.calls.find((c) => c.cmd === "set")!.args[2] as { expiration: { value: number } };
-    expect(opts.expiration.value).toBe(80);
+    expect(opts.expiration.value).toBe(81); // remaining 80 s + 1 s margin
   });
 
   it("does not store an entry that already expired, and drops an entry marked for eviction", async () => {

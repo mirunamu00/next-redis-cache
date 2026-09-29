@@ -1,0 +1,14 @@
+{
+  // Publish build only: compiles src/ (used by tsup for .d.ts generation).
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "declarationMap": true,
+    "sourceMap": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "include": ["src"],
+  "exclude": ["dist", "node_modules"]
+}

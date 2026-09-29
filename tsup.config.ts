@@ -11,6 +11,8 @@ export default defineConfig({
   splitting: true,
   clean: true,
   outDir: "dist",
+  // Build-only config that sees src/ only, so tests and config files never leak into the .d.ts output
+  tsconfig: "tsconfig.build.json",
   target: "node18",
   external: ["next", "@redis/client"],
   treeshake: true,

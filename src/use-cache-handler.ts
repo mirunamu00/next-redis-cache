@@ -5,7 +5,6 @@
  * Stores ReadableStream<Uint8Array> entries in Redis as base64 + metadata.
  */
 
-import type { RedisClientType } from "@redis/client";
 import { streamToBuffer, bufferToStream } from "./stream-utils";
 import { TagManager } from "./tag-manager";
 import { assertClientReady, withTimeout } from "./redis-client";

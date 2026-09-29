@@ -25,13 +25,21 @@
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
-    "dist",
-    "README.md"
+    "dist"
   ],
   "scripts": {
     "build": "tsup",
     "dev": "tsup --watch",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc -p tsconfig.json",
+    "lint": "eslint .",
+    "test": "vitest run --project unit --project property",
+    "test:unit": "vitest run --project unit",
+    "test:prop": "vitest run --project property",
+    "test:coverage": "vitest run --project unit --project property --coverage",
+    "test:watch": "vitest --project unit --project property",
+    "quality": "node scripts/quality.mjs",
+    "check-pack": "node scripts/check-pack.mjs",
+    "check-no-hangul": "node scripts/check-no-hangul.mjs",
     "changeset": "changeset",
     "version": "changeset version",
     "release": "npm run build && changeset publish",
@@ -42,14 +50,25 @@
     "next": ">=15.0.0"
   },
   "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
     "@changesets/changelog-github": "^0.5.2",
     "@changesets/cli": "^2.29.8",
+    "@eslint/js": "^10.0.1",
     "@redis/client": "^5.10.0",
+    "@size-limit/file": "^14.1.0",
     "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^5.0.2",
+    "eslint": "^10.11.0",
+    "fast-check": "^4.10.2",
+    "globals": "^17.12.0",
     "next": "^16.1.4",
+    "publint": "^0.3.24",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
+    "size-limit": "^14.1.0",
     "tsup": "^8.0.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "typescript-eslint": "^8.71.0",
+    "vitest": "^5.0.2"
   }
 }

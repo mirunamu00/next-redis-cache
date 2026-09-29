@@ -9,11 +9,7 @@ import type { RedisClientType } from "@redis/client";
 import { parseBuffersToStrings, convertStringsToBuffers } from "./buffer-utils";
 import { TagManager } from "./tag-manager";
 import { assertClientReady, withTimeout } from "./redis-client";
-import {
-  resolveOptions,
-  type LegacyHandlerConfig,
-  type OnCreationHook,
-} from "./types";
+import { resolveOptions, type OnCreationHook } from "./types";
 
 // ------------------------------------------------------------------
 // Types aligned with next/dist/server/lib/incremental-cache

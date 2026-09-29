@@ -97,7 +97,7 @@
     "test:mutation": "stryker run"
   },
   "peerDependencies": {
-    "@redis/client": ">=5.0.0",
+    "@redis/client": "^5.0.0 || ^6.0.0",
     "next": ">=15.0.0"
   },
   "devDependencies": {

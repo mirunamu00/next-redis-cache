@@ -31,12 +31,16 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
   });
 
   it("requires the test password", async () => {
-    const anonymous = await connectTestClient(server.url.replace("default:test@", ""), { reconnect: false });
-    try {
-      await expect(anonymous.client.ping()).rejects.toThrow(/NOAUTH/);
-    } finally {
-      anonymous.close();
-    }
+    // @redis/client 5 (RESP2) connects and fails on the first command; 6 (RESP3) already fails at HELLO
+    const unauthenticated = async () => {
+      const anonymous = await connectTestClient(server.url.replace("default:test@", ""), { reconnect: false });
+      try {
+        await anonymous.client.ping();
+      } finally {
+        anonymous.close();
+      }
+    };
+    await expect(unauthenticated()).rejects.toThrow(/NOAUTH/);
   });
 
   it("SET NX EX: first write wins, TTL is within range (PTTL)", async () => {

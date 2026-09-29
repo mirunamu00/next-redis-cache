@@ -4,7 +4,7 @@
 #   static (no-hangul, quarantine, lint, typecheck, build, quality) --+
 #   unit (Node 22, 24)                                                |
 #   unit-windows (layers that need no Docker)                         |
-#   integration (Redis 7.2, 8.4 via testcontainers)                   +-- gate (the only required
+#   integration (Redis 7.2, 8.4 via testcontainers; + @redis/client 6) +-- gate (the only required
 #   fault (mini-redis + toxiproxy from docker compose)                |    check for branch protection)
 #   setup (build + npm pack -> tarball artifact)                      |
 #     |- contract (tsc per Next variant)                              |
@@ -113,14 +113,22 @@ jobs:
       - run: npm run build
       - run: npm run check-pack
 
+  # client "lock" = the @redis/client from package-lock.json (5.x). The "6" cell swaps in the latest
+  # @redis/client 6 (RESP3 by default) to back the peer range "^5.0.0 || ^6.0.0": typecheck + every
+  # integration test against real Redis. The fault layer is not repeated there - mini-redis speaks RESP2
+  # only and @redis/client 6 opens with HELLO 3.
   integration:
-    name: integration (Redis ${{ matrix.redis }})
+    name: integration (Redis ${{ matrix.redis }}, @redis/client ${{ matrix.client }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
         redis: ["7.2", "8.4"]
+        client: ["lock"]
+        include:
+          - redis: "8.4"
+            client: "6"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
@@ -128,18 +136,24 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      - name: Install @redis/client ${{ matrix.client }} (peer range cell)
+        if: matrix.client != 'lock'
+        run: |
+          npm install --no-save "@redis/client@${{ matrix.client }}"
+          node -e "console.log('@redis/client', require('@redis/client/package.json').version)"
+          npm run typecheck
       - name: Integration tests (testcontainers)
         run: npm run test:int -- --coverage
         env:
           NRC_REDIS_VERSIONS: ${{ matrix.redis }}
-          NRC_BLOB: integration-${{ matrix.redis }}
+          NRC_BLOB: integration-${{ matrix.redis }}-client${{ matrix.client }}
       - name: Summary
         if: always()
-        run: node scripts/junit-summary.mjs "integration (Redis ${{ matrix.redis }})" reports/junit.xml
+        run: node scripts/junit-summary.mjs "integration (Redis ${{ matrix.redis }}, @redis/client ${{ matrix.client }})" reports/junit.xml
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: always()
         with:
-          name: integration-redis${{ matrix.redis }}
+          name: integration-redis${{ matrix.redis }}-client${{ matrix.client }}
           # two paths keep the artifact rooted at the repository (reports/blob/*.json for the coverage merge)
           path: |
             reports/

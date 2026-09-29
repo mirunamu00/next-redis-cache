@@ -1,165 +1,166 @@
-# @mirunamu/next-redis-cache 고도화 로드맵
+# @mirunamu/next-redis-cache hardening roadmap
 
-이 문서는 패키지 고도화의 **기준 문서**다. 모든 작업 세션은 이 문서를 먼저 읽고, 결정이 바뀌면 이 문서를 갱신한다.
-npm 게시물에는 포함되지 않는다(`package.json`의 `files`는 `dist`만 — `scripts/check-pack.mjs`가 강제).
+This document is the **source of truth** for hardening the package. Every work session reads it first and updates it when a decision changes.
+It is not part of the npm package (`files` in `package.json` is `dist` only - enforced by `scripts/check-pack.mjs`).
 
-- 작성: 2026-09-29 (1.0.6 기준 감사 → 계획 → 테스트 환경 재설계를 합친 것)
-- 대상 버전: 1.0.6(게시본) → 1.1.0(핫픽스, 게시 준비 완료 — 11절) → 2.0.0
-- 레퍼런스 소비자: `mirunamu-cluster/docs` 앱(docs.mirunamu.info). 단, **모든 검증은 이 레포 안의 테스트 환경에서** 하고 docs는 롤아웃 스모크만 맡는다.
+- Written: 2026-09-29 (1.0.6 audit -> plan -> test environment redesign, merged into one document)
+- Versions: 1.0.6 (published) -> 1.1.0 (hotfix, ready to publish - section 11) -> 2.0.0
+- Reference consumer: the `mirunamu-cluster/docs` app (docs.mirunamu.info). **All verification happens in this repository's test environment**; docs only does rollout smoke tests.
+- Language: everything in this repository is English - code, comments, strings, test names, Markdown, commit messages (2026-09-29 user decision, see 6.1). The branch history was rewritten to English on 2026-09-29 (user decision, Q20).
 
 ---
 
-## 1. 현재 상태 요약 (1.0.6)
+## 1. Current state (1.0.6)
 
-| 항목 | 내용 |
+| Item | Content |
 |---|---|
-| 공개 API | `.` → `LegacyCacheHandler`(named+default), 타입 `LegacyHandlerConfig`·`OnCreationHook`·`RedisHandlerOptions`·`ResolvedRedisOptions` / `./use-cache` → `createUseCacheHandler` / `./instrumentation` → `registerInitialCache`·`cleanupOldBuildKeys` |
-| peer | `next >=15.0.0`, `@redis/client >=5.0.0` (dependencies 없음) |
-| 빌드 | tsup ESM `.js` + CJS `.cjs` + `.d.ts`/`.d.cts`, target node18. exports의 `types`가 조건 없이 `.d.ts`만 가리킴 |
-| 테스트 | **없음** (테스트 앱은 1.0.3에서 삭제) |
-| 게시 | changesets/action + `NPM_TOKEN`. npm 1.0.6 = 레포 1.0.6 = docs 설치본(로컬 dist와 바이트 동일 확인) |
-| 사용량 | npm 월 4,398 다운로드(2026-08-29~09-27) — docs CI만으로 설명 어려움 → 외부 사용자 가능성 |
+| Public API | `.` -> `LegacyCacheHandler` (named + default), types `LegacyHandlerConfig`, `OnCreationHook`, `RedisHandlerOptions`, `ResolvedRedisOptions` / `./use-cache` -> `createUseCacheHandler` / `./instrumentation` -> `registerInitialCache`, `cleanupOldBuildKeys` |
+| peer | `next >=15.0.0`, `@redis/client >=5.0.0` (no dependencies) |
+| Build | tsup ESM `.js` + CJS `.cjs` + `.d.ts`/`.d.cts`, target node18. The exports `types` condition points at `.d.ts` unconditionally |
+| Tests | **none** (the test app was deleted in 1.0.3) |
+| Publishing | changesets/action + `NPM_TOKEN`. npm 1.0.6 = repo 1.0.6 = docs install (byte-identical to the local dist) |
+| Usage | 4,398 npm downloads/month (2026-08-29..09-27) - more than docs CI explains -> external users likely |
 
-### 1.1 모듈과 동작
+### 1.1 Modules and behavior
 
-- `legacy-handler.ts` — 정적 상태를 가진 CacheHandler 클래스. `onCreation(hook)` 등록 → 첫 호출 때 1회 초기화. get: GET → Buffer 복원 → `HEXISTS` 고아 검사 → `lifespan.expireAt` 검사 → `HMGET revalidated`로 태그 판정. set: `SET EX [NX]` + `HSET tags` + `HSET ttl`을 `Promise.all`(원자적 아님). revalidateTag: 태그 Hash 전체 `HSCAN` 후 해당 키 UNLINK, 암묵 태그(`_N_T_`)만 시각 기록.
-- `use-cache-handler.ts` — 팩토리. get: pending set 대기 → GET → `now > timestamp+revalidate*1000`이면 미스 → soft/entry 태그 HMGET 2회. set: tee → base64 → `SET EX`. `updateTags`: durations 있으면 `now + expire*1000` 기록.
-- `tag-manager.ts` — Hash 3종(`{prefix}{sharedTagsKey}` cacheKey→태그 JSON, `{prefix}{sharedTagsTtlKey}` cacheKey→만료초, `{prefix}{revalidatedTagsKey}` tag→ms). 전부 TTL 없음.
-- `instrumentation.ts` — `registerInitialCache`(prerender-manifest v4 → 디스크 → `set NX`), `cleanupOldBuildKeys`(SCAN → 메모리에 모두 모아 `DEL` 한 번).
-- `redis-client.ts` — `assertClientReady`(isReady만), `withTimeout`(Promise.race, 타이머 해제 안 함).
-- 오류 로그는 `NEXT_PRIVATE_DEBUG_CACHE`일 때만 남는다.
+- `legacy-handler.ts` - CacheHandler class with static state. `onCreation(hook)` registers -> initialized once on first call. get: GET -> restore Buffers -> `HEXISTS` orphan check -> `lifespan.expireAt` check -> `HMGET revalidated` tag check. set: `SET EX [NX]` + `HSET tags` + `HSET ttl` via `Promise.all` (not atomic). revalidateTag: `HSCAN` the whole tag hash, UNLINK matching keys, record a time only for implicit tags (`_N_T_`).
+- `use-cache-handler.ts` - factory. get: wait for a pending set -> GET -> miss if `now > timestamp + revalidate*1000` -> HMGET soft/entry tags (2 calls). set: tee -> base64 -> `SET EX`. `updateTags`: with durations records `now + expire*1000`.
+- `tag-manager.ts` - 3 hashes (`{prefix}{sharedTagsKey}` cacheKey -> tag JSON, `{prefix}{sharedTagsTtlKey}` cacheKey -> expiry seconds, `{prefix}{revalidatedTagsKey}` tag -> ms). None has a TTL.
+- `instrumentation.ts` - `registerInitialCache` (prerender-manifest v4 -> disk -> `set NX`), `cleanupOldBuildKeys` (SCAN -> collect everything in memory -> one `DEL`).
+- `redis-client.ts` - `assertClientReady` (isReady only), `withTimeout` (Promise.race, timer never cleared).
+- Errors are logged only with `NEXT_PRIVATE_DEBUG_CACHE`.
 
-### 1.2 Next.js 인터페이스 사실 (소스로 확인)
+### 1.2 Next.js interface facts (verified in source)
 
 - Next 16.1.6 = 16.3.6 `CacheHandler`: `get(key, softTags)`, `set(key, pendingEntry)`, `refreshTags()`, `getExpiration(tags[])`, `updateTags(tags, durations?)`.
-- Next 15.5.26 `CacheHandlerV2`: `getExpiration(...tags)`(가변), `expireTags(...tags)` — `updateTags` 없음 → **현 패키지는 Next 15에서 use-cache가 올바르게 동작하지 않는다.**
-- `revalidateTag(tag, profile)`(16): `revalidation-utils.js`가 `updateTags(tags, {expire: cacheLife.expire})` 호출('max' = 1년). profile 없으면 `updateTags(tags)`(즉시 만료).
-- 기본 핸들러 의미론: `updateTags(durations)` = `stale=now`, `expired=now+expire*1000`. `areTagsExpired`: `expired ≤ now && expired > ts`. `areTagsStale`: `stale > ts`.
-- use-cache SWR: `use-cache-wrapper.js`가 revalidate 지난(expire 전) 항목을 받으면 응답 후 백그라운드 재생성. 16.3.6 기본 핸들러는 stale 태그면 `revalidate:-1`, 음수 `expire`는 퇴거 표식.
-- 레거시 SWR: 핸들러가 `lastModified:-1`을 주면 `IncrementalCache`가 isStale=-1 → response-cache가 기존 값 응답 + 백그라운드 재생성. **null을 주면 `dynamicParams=false` 경로는 404**(docs 운영 사고).
-- `getExpiration`이 `Infinity`를 반환하면 Next는 암묵 태그를 `get(softTags)`에 맡긴다.
+- Next 15.5.26 `CacheHandlerV2`: `getExpiration(...tags)` (variadic), `expireTags(...tags)` - no `updateTags` -> **the package's use-cache handler does not work correctly on Next 15.**
+- `revalidateTag(tag, profile)` (16): `revalidation-utils.js` calls `updateTags(tags, {expire: cacheLife.expire})` ('max' = 1 year). Without a profile `updateTags(tags)` (immediate expiry).
+- Default handler semantics: `updateTags(durations)` = `stale=now`, `expired=now+expire*1000`. `areTagsExpired`: `expired <= now && expired > ts`. `areTagsStale`: `stale > ts`. Its `getExpiration` returns `expired` (a future time after a profile update).
+- use-cache SWR: `use-cache-wrapper.js` regenerates in the background after responding when it gets an entry past revalidate (before expire). The 16.3.6 default handler returns `revalidate:-1` for stale tags; a negative `expire` marks eviction.
+- Legacy SWR: if the handler returns `lastModified:-1`, `IncrementalCache` sets isStale=-1 -> response-cache serves the old value + regenerates in the background. **Returning null makes `dynamicParams=false` routes 404** (the docs production incident).
+- If `getExpiration` returns `Infinity`, Next leaves implicit tags to `get(softTags)`.
 
 ---
 
-## 2. 감사 결과 — 문제 목록 (7-1 ~ 7-13)
+## 2. Audit - issue list (7-1 .. 7-13)
 
-| ID | 심각도 | 문제 | 근거(1.0.6) |
+| ID | Severity | Problem | Evidence (1.0.6) |
 |---|---|---|---|
-| 7-1 | 높음 | `revalidateTag(tag,'max')` → `updateTags(durations)`가 **미래 시각**(`now+1년`)을 기록 → 해당 태그의 use-cache·레거시 항목이 1년간 매번 stale/삭제(캐시 사실상 비활성). 공유 Hash라 레거시 `isStale`도 오염 | `tag-manager.ts:196-198`, `use-cache-handler.ts:107-122`, `tag-manager.ts:66-80` |
-| 7-2 | 높음 | README 예시대로 `await client.connect()` 하면(v5 기본 무한 재연결) Redis 다운 시 hook이 끝나지 않아 **모든 get/set 무한 대기**. `cleanupOldBuildKeys`도 연결 타임아웃 없음. hook 예외는 try 밖이라 Next로 전파 | `legacy-handler.ts:148,201,277`, `instrumentation.ts:252`, README |
-| 7-3 | 중간 | use-cache 경로가 `exec(client.get(...))` — 명령을 **먼저 보내고** isReady 검사. 재연결 중이면 offline queue 무한 적재, 소켓이 닫혀 있으면 rejected promise가 핸들러 없이 버려져 **unhandledRejection → 프로세스 종료** | `use-cache-handler.ts:78-81,96,191`, `tag-manager.ts:29-32`, `@redis/client client/index.js:638-640` |
-| 7-4 | 중간 | 프리워밍: ① 세그먼트 Map 키가 Next(`/_tree`, `/about/__PAGE__`)와 다름(`_tree`, `about/__PAGE__`) → prefetch 204 ② `/`가 `app/.html`로 누락 ③ `dataRoute` 없는 route를 건너뛰어 APP_ROUTE 분기가 죽은 코드 ④ meta `status`·`postponed` 유실 | `instrumentation.ts:126,135,63,208,88-89` |
-| 7-5 | 중간 | 값은 EX로 사라져도 태그·TTL Hash 필드는 영구 잔존. `cleanupExpired`·`deleteTags`는 호출처 없음. `revalidateTag`는 Hash 전체 O(N) 스캔 + JSON.parse(깨진 필드 하나면 전체 중단) | `tag-manager.ts:55,127,97-115` |
-| 7-6 | 중간 | 레거시 `revalidateTag`가 `durations` 무시하고 즉시 삭제만 → Next 16 SWR 의미와 불일치, `dynamicParams=false` 404 위험. 명시 태그는 시각 미기록 → 렌더 중 무효화 시 옛 데이터 부활 레이스 | `legacy-handler.ts:350-369` |
-| 7-7 | 중간 | 모든 오류 로그가 debug 게이트 뒤 → 운영에서 set·무효화 실패가 무음 | `legacy-handler.ts:266-268,345-347,365-367` |
-| 7-8 | 중간 | Next 15 호환 주장(README·peer)이 검증되지 않았고 실제로 인터페이스 불일치(1.2절) | `package.json:42`, README |
-| 7-9 | 낮음~중간 | `cleanupOldBuildKeys`: 전량 메모리 수집 후 단일 `DEL`(블로킹, README의 non-blocking 주장과 모순), 중복 집계, deprecated `disconnect()`, `keepPrefix`로 롤링 중 옛 Pod 키 삭제 | `instrumentation.ts:255-279` |
-| 7-10 | 낮음 | `withTimeout` 타이머 미해제 → 호출마다 5초 타이머 잔존, 종료 지연 | `redis-client.ts:15-20` |
-| 7-11 | 낮음 | APP_ROUTE는 `ctx.cacheControl` 미참조 → Next 16에서 항상 기본 1년×1.5 TTL. use-cache는 revalidate 지나면 버리면서 TTL은 expire 기준(쓸모없는 데이터 체류). TTL이 lastModified 기준이라 오래된 빌드의 재시드가 즉시 만료 | `legacy-handler.ts:101`, `use-cache-handler.ts:98-102,183-186` |
-| 7-12 | 낮음 | set 3명령 비원자·NX 스킵이어도 Hash 덮어씀. 다른 Pod에서 값 기록과 HSET 사이의 get이 방금 쓴 값을 고아로 삭제 가능. 같은 키 set 중첩 시 앞 set의 finally가 뒤 set의 pending을 지움 | `legacy-handler.ts:335-342`, `use-cache-handler.ts:196-197` |
-| 7-13 | 낮음 | README 불일치: in-flight 중복 제거 과장, 전 호출 타임아웃 주장, 기본 `uc:` 프리픽스가 keyPrefix 밖, `cacheLife("hours")` 값 오기, App Route 프리워밍 미동작, `LICENSE` 파일 부재, 보안(Redis 쓰기 권한 = 캐시 오염 권한) 언급 없음, Action이 태그 고정 | README 각처 |
+| 7-1 | high | `revalidateTag(tag,'max')` -> `updateTags(durations)` records a **future time** (`now+1y`) -> every use-cache and legacy entry of that tag is stale/deleted for a year (cache effectively off). Shared hash, so legacy `isStale` is polluted too | `tag-manager.ts:196-198`, `use-cache-handler.ts:107-122`, `tag-manager.ts:66-80` |
+| 7-2 | high | With the README's `await client.connect()` (v5 reconnects forever) a Redis outage means the hook never finishes -> **every get/set waits forever**. `cleanupOldBuildKeys` has no connect timeout either. Hook exceptions are outside the try and propagate to Next | `legacy-handler.ts:148,201,277`, `instrumentation.ts:252`, README |
+| 7-3 | medium | The use-cache path does `exec(client.get(...))` - **sends first**, checks isReady afterwards. While reconnecting the offline queue grows without bound; with a closed socket the rejected promise is dropped without a handler -> **unhandledRejection -> process exit** | `use-cache-handler.ts:78-81,96,191`, `tag-manager.ts:29-32`, `@redis/client client/index.js:638-640` |
+| 7-4 | medium | Prewarm: (1) segment Map keys differ from Next (`_tree`, `about/__PAGE__` vs `/_tree`, `/about/__PAGE__`) -> prefetch 204 (2) `/` is looked up as `app/.html` and skipped (3) routes without `dataRoute` are skipped, so the APP_ROUTE branch is dead code (4) meta `status` and `postponed` are lost | `instrumentation.ts:126,135,63,208,88-89` |
+| 7-5 | medium | Values expire via EX but tag/TTL hash fields stay forever. `cleanupExpired` and `deleteTags` have no callers. `revalidateTag` scans the whole hash O(N) + JSON.parse (one broken field aborts everything) | `tag-manager.ts:55,127,97-115` |
+| 7-6 | medium | Legacy `revalidateTag` ignores `durations` and deletes immediately -> mismatch with Next 16 SWR, `dynamicParams=false` 404 risk. Explicit tags get no timestamp -> old data can come back when invalidated during a render | `legacy-handler.ts:350-369` |
+| 7-7 | medium | Every error log is behind the debug flag -> failed sets and invalidations are silent in production | `legacy-handler.ts:266-268,345-347,365-367` |
+| 7-8 | medium | Next 15 compatibility (README, peer) is claimed but unverified and the interface actually differs (1.2) | `package.json:42`, README |
+| 7-9 | low-medium | `cleanupOldBuildKeys`: collects everything in memory then one `DEL` (blocking; contradicts the README's non-blocking claim), double counting, deprecated `disconnect()`, `keepPrefix` deletes the old pods' keys during a rolling update | `instrumentation.ts:255-279` |
+| 7-10 | low | `withTimeout` never clears its timer -> one 5 s timer left per call, delays shutdown | `redis-client.ts:15-20` |
+| 7-11 | low | APP_ROUTE ignores `ctx.cacheControl` -> on Next 16 always the default 1 year x 1.5 TTL. use-cache discards past revalidate but keeps the TTL at expire (useless data stays). TTL is based on lastModified, so re-seeding an old build expires immediately | `legacy-handler.ts:101`, `use-cache-handler.ts:98-102,183-186` |
+| 7-12 | low | The three set commands are not atomic, and the hashes are overwritten even when NX skipped. A get on another pod between the value write and HSET can delete the value as orphaned. Overlapping sets of one key: the first set's finally clears the second set's pending marker | `legacy-handler.ts:335-342`, `use-cache-handler.ts:196-197` |
+| 7-13 | low | README inaccuracies: exaggerated in-flight dedup, "every call has a timeout", default `uc:` prefix outside keyPrefix, wrong `cacheLife("hours")` values, App Route prewarm does not work, no `LICENSE` file, no security note (Redis write access = cache poisoning), actions pinned by tag | README |
 
-### 2.1 P0c~P0d에서 새로 확인한 사실
+### 2.1 Found in P0c..P0d
 
-- **빈 Redis에서 prerender 경로 404(A2)**: 1.0.6 + Redis 연결 정상 + 키 없음 → `dynamicParams=false` 페이지가 404(Next가 null을 받으면 NoFallbackError). docs의 프리워밍 의존·운영 사고와 같은 경로다. 프리워밍을 켜도 `dynamicParams=false` 페이지는 무효화 뒤(7-6)·키 유실 뒤(C6)·롤링 중 정리 뒤(C11·C12)에 그대로 404다.
-- **세그먼트 prefetch 미스는 16.3.6에서 404**(1절·7-4의 "204"는 이전 버전 관찰). 프리워밍 키 형식이 틀리면 404, Next가 직접 렌더해 저장한 항목은 200.
-- **프리워밍이 `/_`로 시작하는 라우트를 통째로 건너뛴다**(`/_not-found`) — 7-4의 "not-found status 유실"은 실제로는 "아예 프리워밍 안 됨"이다.
-- **7-3은 기본 재연결 클라이언트에서도 터진다**: 트래픽 중 Redis가 3초 끊기면 unhandledRejection 165~171건. 핸들러가 명령을 먼저 보내고 ready 검사에서 버린 promise 중 일부가 재연결 실패 때 거절되는 것으로 추정한다(나머지는 offline queue에 남았다가 복구 후 재전송, 3~22건 관측).
-- **레거시 클래스 타입 비호환**: `LegacyCacheHandler`는 Next `CacheHandlerContext`로 생성되는 클래스 타입에 대입되지 않는다(자체 context 타입의 index signature). 7-8에 포함, contract-types가 `@ts-expect-error`로 추적.
-- `@redis/client` **6.2.1이 출시**됐다. peer `>=5.0.0`은 검증되지 않은 6.x를 허용한다(9절 리스크).
+- **Prerendered routes 404 on an empty Redis (A2)**: 1.0.6 + Redis up + no keys -> `dynamicParams=false` pages 404 (Next gets null -> NoFallbackError). Same path as the docs prewarm dependency and incident. Even with prewarm on, `dynamicParams=false` pages still 404 after an invalidation (7-6), after key loss (C6) and after a cleanup during a rolling update (C11, C12).
+- **A segment prefetch miss is a 404 on 16.3.6** (the "204" in section 1 and 7-4 was an older version). Wrong prewarm key format -> 404; entries Next rendered and stored itself -> 200.
+- **Prewarm skips every route starting with `/_`** (`/_not-found`) - the "not-found status lost" part of 7-4 is really "not prewarmed at all".
+- **7-3 also happens with the default reconnecting client**: a 3 s Redis outage under traffic -> 165..171 unhandledRejections. Presumably some of the promises the handler sent before the ready check are rejected when the reconnect fails (the rest stay in the offline queue and are replayed after recovery; 3..22 observed).
+- **Legacy class type incompatibility**: `LegacyCacheHandler` is not assignable to the class type Next constructs with `CacheHandlerContext` (index signature of its own context type). Part of 7-8, tracked by contract-types with `@ts-expect-error`.
+- `@redis/client` **6.2.1 is out**. peer `>=5.0.0` admits unverified 6.x (section 9 risk; resolved in P1, D14).
 
 ---
 
-## 3. 목표와 수용 기준
+## 3. Goals and acceptance criteria
 
-**목표**: Next 16의 두 캐시 인터페이스를 의미론까지 정확히 구현하고, Redis 장애·지연·부재·축출에서도 정적 페이지가 404 없이 응답하며, Redis 메모리를 한정하고, 이 모두를 레포 내장 회귀 테스트로 고정한다. docs 래퍼(526줄)를 설정 수준으로 축소한다.
+**Goal**: implement both Next 16 cache interfaces with correct semantics, answer static pages without 404 through Redis failures, latency, absence and eviction, bound Redis memory, and pin all of it with in-repo regression tests. Shrink the docs wrapper (526 lines) to configuration.
 
-**비목표**: ioredis, Redis Cluster·Sentinel, Pages Router 고급 기능, Edge 런타임, Next 15의 use-cache.
+**Non-goals**: ioredis, Redis Cluster/Sentinel, advanced Pages Router features, Edge runtime, use-cache on Next 15.
 
-| # | 수용 기준 | 측정 위치 |
+| # | Acceptance criterion | Measured by |
 |---|---|---|
-| A1 | 7-1~7-12 각각 1.0.6에서 실패하는 테스트 존재, 2.0에서 전부 통과 | vitest `it.fails` → 일반 전환 |
-| A2 | Redis 없이 기동 → 첫 응답 < 2s, 모든 prerender 경로 200 | static-site e2e + chaos C1 |
-| A3 | Redis 무응답 중 요청 지연: 첫 1회 ≤ readTimeout, circuit open 동안 ≤ 50ms 추가 | chaos C3 |
-| A4 | 장애 주입 전체에서 `unhandledRejection` 0, 복구 후 offline queue 폭주 0 | fault + chaos |
-| A5 | 배포 10회 시뮬레이션 후 키 수 ≤ (보존 빌드 × 페이지) + 태그 수, TTL 없는 키는 `_tagstate`·`_builds` 2개뿐 | integration + fleet |
-| A6 | 프리워밍/재시드된 모든 페이지의 세그먼트 prefetch 200 | static-site e2e |
-| A7 | `revalidateTag(t,'max')` 후 다음 요청 stale 응답+1회 재생성, 이후 히트. `updateTag(t)`는 즉시 미스 | full-cc / full-legacy e2e |
-| A8 | 인스턴스 2개 공유 Redis에서 한쪽 무효화가 다른 쪽 다음 요청에 반영 | fleet e2e |
-| A9 | 빌드 1벌 Redis 메모리 50% 이상 감소(압축 옵션) | static-site perf |
-| A10 | docs 캐시 코드 ≤ 약 40줄, `resilient-cache-handler.mjs`·`redis-connect.mjs`·`build-keys.mjs` 제거 | docs PR |
+| A1 | 7-1..7-12 each have a test that fails on 1.0.6 and passes on 2.0 | vitest `it.fails` -> regular |
+| A2 | Start without Redis -> first response < 2 s, every prerendered route 200 | static-site e2e + chaos C1 |
+| A3 | Latency while Redis is unresponsive: first call <= readTimeout, <= 50 ms extra while the circuit is open | chaos C3 |
+| A4 | Zero `unhandledRejection` across all fault injections, no offline-queue burst after recovery | fault + chaos |
+| A5 | After 10 simulated deployments keys <= (kept builds x pages) + tags; only `_tagstate` and `_builds` have no TTL | integration + fleet |
+| A6 | Segment prefetch 200 for every prewarmed/re-seeded page | static-site e2e |
+| A7 | After `revalidateTag(t,'max')` the next request is a stale response + one regeneration, then hits. `updateTag(t)` is an immediate miss | full-cc / full-legacy e2e |
+| A8 | Two instances on a shared Redis: an invalidation on one is visible on the other's next request | fleet e2e |
+| A9 | Redis memory for one build down >= 50% (compression option) | static-site perf |
+| A10 | docs cache code <= ~40 lines, `resilient-cache-handler.mjs`, `redis-connect.mjs`, `build-keys.mjs` removed | docs PR |
 
 ---
 
-## 4. 버전 전략
+## 4. Version strategy
 
-- **1.1.0 핫픽스 먼저**(스키마 불변): 7-1(now 기록), 7-3(thunk 실행), 7-4(세그먼트 키·`/index`·APP_ROUTE·status), 7-9(배치 UNLINK·`destroy`·연결 타임아웃), 7-10(`clearTimeout`), 오류 warn 로깅, LICENSE, exports types. 외부 사용자 즉시 이득 + OIDC 게시 파이프라인 실검증.
-- **2.0.0 메이저**: 키 스키마·저장 형식, 옵션 체계(`keyPrefix` → `namespace`+`buildId`, `sharedTagsKey`/`sharedTagsTtlKey` 폐지), 팩토리 API(정적 클래스 폐기), peer `next ^16.1`·`@redis/client ^5`, `engines.node >=20.9`, instrumentation API 교체.
-- **무중단 전환**: 값 키는 빌드 ID 범위라 새 이미지는 새 키 공간을 쓴다(옛 v1 Pod와 공존). v2 키도 `{ns}:{buildId}:…`(두 번째 세그먼트 = 소유자)를 유지해 v2 정리가 v1 옛 빌드 키(`docs:<sha>:/about`)를 같은 규칙으로 치운다. 빌드 무관 전역 키는 `_` 예약 소유자(`{ns}:_builds`, `{ns}:_tagstate`)이며 정리 대상에서 제외. 저장 엔벨로프에 형식 버전을 넣고 모르는 버전은 미스 처리.
-- 리스크: 전환 후 v1 이미지로 롤백하면 v1 docs 정리(`build-keys.mjs`)가 `_tagstate`를 옛 빌드로 보고 30분 idle 시 삭제 — docs는 태그 무효화를 안 써서 무해, 문서화.
+- **1.1.0 hotfix first** (schema unchanged): 7-1 (record now), 7-3 (thunk execution), 7-4 (segment keys, `/index`, APP_ROUTE, status), 7-9 (batched UNLINK, `destroy`, connect timeout), 7-10 (`clearTimeout`), always-on warn logging, LICENSE, exports types. Immediate benefit for external users + a real test of the OIDC publishing pipeline.
+- **2.0.0 major**: key schema and storage format, options (`keyPrefix` -> `namespace` + `buildId`, drop `sharedTagsKey`/`sharedTagsTtlKey`), factory API (no static class), peer `next ^16.1`, `@redis/client ^5`, `engines.node >=20.9`, new instrumentation API.
+- **Zero-downtime switch**: value keys are build-scoped, so a new image uses a new key space (coexists with old v1 pods). v2 keys keep `{ns}:{buildId}:...` (second segment = owner) so v2 cleanup removes old v1 build keys (`docs:<sha>:/about`) with the same rule. Build-independent global keys use the reserved `_` owner (`{ns}:_builds`, `{ns}:_tagstate`) and are never cleaned up. The stored envelope carries a format version; unknown versions are misses.
+- Risk: rolling back to a v1 image after the switch, the v1 docs cleanup (`build-keys.mjs`) treats `_tagstate` as an old build and deletes it after 30 min idle - harmless for docs (no tag invalidation), to be documented.
 
 ---
 
-## 5. 목표 아키텍처 (2.0)
+## 5. Target architecture (2.0)
 
-### 5.1 키 스키마
+### 5.1 Key schema
 
-| 키 | 타입 | TTL | 내용 |
+| Key | Type | TTL | Content |
 |---|---|---|---|
-| `{ns}:{build}:e:{cacheKey}` | String(바이너리 엔벨로프) | 항상 | 레거시 항목 |
-| `{ns}:{build}:u:{cacheKey}` | String(바이너리 엔벨로프) | 항상 | use-cache 항목 |
-| `{ns}:_tagstate` | Hash tag → `"{stale},{expired}"`(ms) | 없음(태그 수로 한정). Redis ≥7.4면 선택적 HEXPIRE | 두 핸들러 공유 태그 상태 |
-| `{ns}:_builds` | ZSET | 없음 | 빌드 레지스트리 |
+| `{ns}:{build}:e:{cacheKey}` | String (binary envelope) | always | legacy entry |
+| `{ns}:{build}:u:{cacheKey}` | String (binary envelope) | always | use-cache entry |
+| `{ns}:_tagstate` | Hash tag -> `"{stale},{expired}"` (ms) | none (bounded by tag count); optional HEXPIRE on Redis >= 7.4 | tag state shared by both handlers |
+| `{ns}:_builds` | ZSET | none | build registry |
 
-- **태그→키 역인덱스 폐지, lazy 무효화만**(Next 기본 핸들러와 동일) → 7-5 구조적 해소.
-- 태그 상태는 **네임스페이스 전역**(데이터 무효화는 옛 빌드 Pod에도 적용되어야 함).
-- 엔벨로프: `[magic+ver][메타 JSON 길이][메타 JSON][blob…]` — Buffer·Map 세그먼트를 base64 없이 저장, 선택적 gzip/brotli. 읽기는 `withTypeMapping({[RESP_TYPES.BLOB_STRING]: Buffer})`.
+- **No tag -> key reverse index, lazy invalidation only** (same as Next's default handler) -> 7-5 solved structurally.
+- Tag state is **namespace-global** (a data invalidation must also apply to old-build pods).
+- Envelope: `[magic+ver][meta JSON length][meta JSON][blob...]` - Buffers and segment Maps without base64, optional gzip/brotli. Reads use `withTypeMapping({[RESP_TYPES.BLOB_STRING]: Buffer})`.
 
-### 5.2 의미론 (Next 16)
+### 5.2 Semantics (Next 16)
 
-- `updateTags(tags, durations?)` = 레거시 `revalidateTag(tags, durations?)` = 같은 함수: durations 없음 → `expired=now`; 있음 → `stale=now, expired=now+expire*1000`. 두 핸들러가 멱등 HSET. **키 삭제 없음.**
-- 태그 판정은 Next의 `areTagsExpired`/`areTagsStale`를 그대로 이식.
-- use-cache `get`: `expire<0`(퇴거 표식)·`now > ts+expire*1000`·태그 expired → 미스 / stale 태그 → `revalidate:-1` / revalidate만 지남 → 그대로 반환(Next SWR). `swr:false`면 현행.
-- `getExpiration` → `Infinity`(암묵 태그는 `get(softTags)`에서 1회 판정). 16.1·16.3 fixture로 검증 후 확정.
-- 레거시 `get`: softTags가 있으면 GET+HMGET 파이프라인 → 저장 태그 잔여분 HMGET(최대 2왕복). FETCH+expired → null. APP_PAGE/APP_ROUTE/PAGES는 expired·stale → `lastModified:-1`(SWR). 옵션 `onTagExpired:"stale"|"miss"`(기본 stale). HEXISTS 고아 검사·`lifespan.expireAt` 검사 제거.
-- TTL: **기록 시점 기준**. revalidate 숫자 → `estimateExpire(revalidate)`(기본 1.5배), `false` → `ttl.staticSeconds`(기본 30일), 전부 `ttl.maxSeconds` 상한. APP_ROUTE는 `ctx.cacheControl` 참조.
-- `pendingSets`는 set별 토큰으로 관리. Redis 저장 시 불필요한 `tee` 제거.
+- `updateTags(tags, durations?)` = legacy `revalidateTag(tags, durations?)` = one function: no durations -> `expired=now`; durations -> `stale=now, expired=now+expire*1000`. Both handlers write an idempotent HSET. **No key deletion.**
+- Tag checks port Next's `areTagsExpired`/`areTagsStale` as-is.
+- use-cache `get`: `expire<0` (eviction mark), `now > ts+expire*1000` or an expired tag -> miss / stale tag -> `revalidate:-1` / only revalidate passed -> returned as-is (Next SWR). `swr:false` keeps the current behavior.
+- `getExpiration` -> `Infinity` (implicit tags checked once in `get(softTags)`). Confirmed with 16.1 and 16.3 fixtures.
+- Legacy `get`: with softTags, GET+HMGET pipelined -> HMGET for the remaining stored tags (at most 2 round trips). FETCH + expired -> null. APP_PAGE/APP_ROUTE/PAGES expired or stale -> `lastModified:-1` (SWR). Option `onTagExpired:"stale"|"miss"` (default stale). Remove the HEXISTS orphan check and the `lifespan.expireAt` check.
+- TTL: **from the write time**. Numeric revalidate -> `estimateExpire(revalidate)` (default x1.5), `false` -> `ttl.staticSeconds` (default 30 days), everything capped at `ttl.maxSeconds`. APP_ROUTE reads `ctx.cacheControl`.
+- `pendingSets` tracked per set with a token. No `tee` when storing to Redis.
 
-### 5.3 연결·타임아웃·circuit·로깅
+### 5.3 Connection, timeouts, circuit, logging
 
-- 모든 명령은 `run(op, () => client.cmd(...))` 한 곳을 통과: circuit open 또는 `!isReady` → **명령을 보내지 않고** unavailable. 해제되는 타이머로 타임아웃(5.10의 명령 `timeout` 옵션 병행은 확인 후). 타임아웃 1회 → `openMs` 동안 open.
-- `client`는 인스턴스 또는 `() => client|null`. 패키지는 `connect()`를 await하지 않는다. `./redis`의 `connectRedis(url,{waitMs=1000})` 제공(늦어도 클라이언트 반환, 끊김/복구 전이 로그). globalThis 심볼로 클라이언트 1개 공유.
-- `logger` 옵션(기본 console warn/error, debug는 `NEXT_PRIVATE_DEBUG_CACHE`), 전이 시에만 기록 + 주기 요약. `onEvent` 훅(hit/miss/stale/fallback/reseed/error/circuit).
-- 기본 `disabled` = `NEXT_PHASE === "phase-production-build"` → 내장 no-op.
+- Every command goes through one `run(op, () => client.cmd(...))`: circuit open or `!isReady` -> **nothing is sent**, unavailable. Timeout with a cleared timer (whether to also use the client's command `timeout` option is decided after checking). One timeout -> open for `openMs`.
+- `client` is an instance or `() => client|null`. The package never awaits `connect()`. `./redis` provides `connectRedis(url,{waitMs=1000})` (returns the client late at the latest, logs disconnect/recover transitions). One shared client via a globalThis symbol.
+- `logger` option (default console warn/error, debug with `NEXT_PRIVATE_DEBUG_CACHE`), logging only on transitions + periodic summaries. `onEvent` hook (hit/miss/stale/fallback/reseed/error/circuit).
+- Default `disabled` = `NEXT_PHASE === "phase-production-build"` -> built-in no-op.
 
-### 5.4 빌드 산출물(디스크) 폴백 흡수
+### 5.4 Build-output (disk) fallback
 
-- APP_PAGE·APP_ROUTE, `!dev && !disabled && serverDistDir`일 때. Next `FileSystemCache`를 읽기 전용(`flushToDisk:false`, `maxMemoryCacheSize:0`)으로 사용 — Next 버전 형식을 자동 추종. 내부 경로 의존은 동적 import 가드 + 매트릭스 계약 테스트.
-- 디스크 항목도 태그 상태로 판정: stale → `lastModified:-1`, fresh → NX 재시드(revalidate는 prerender-manifest, `/`→`/index`).
-- 프리워밍은 같은 경로로 재작성(7-4 구조적 해소). 폴백+재시드가 있으면 프리워밍은 선택이며 기본 off.
+- APP_PAGE and APP_ROUTE, when `!dev && !disabled && serverDistDir`. Uses Next's `FileSystemCache` read-only (`flushToDisk:false`, `maxMemoryCacheSize:0`) - follows the Next version's format automatically. The internal path dependency is guarded by a dynamic import + matrix contract tests.
+- Disk entries are also checked against tag state: stale -> `lastModified:-1`, fresh -> NX re-seed (revalidate from prerender-manifest, `/` -> `/index`).
+- Prewarm is rewritten on the same path (7-4 solved structurally). With fallback + re-seed, prewarm is optional and off by default.
 
-### 5.5 옛 빌드 정리 흡수
+### 5.5 Old-build cleanup
 
-docs `build-keys.mjs` 알고리즘 이식: 레지스트리 ZSET, 현재+직전 N개 보존, 그 외는 모든 키 `OBJECT IDLETIME ≥ minIdleSeconds`일 때만 배치 UNLINK, 보류·직전 빌드는 TTL 상한, `cleanupWhenReady`(ready 대기 + 지수 백오프). `_*` 소유자 제외. v1 `cleanupOldBuildKeys`는 수정 후 2.x deprecated, 3.0 제거.
+Port of the docs `build-keys.mjs` algorithm: registry ZSET, keep the current + N previous builds, delete others with batched UNLINK only when every key has `OBJECT IDLETIME >= minIdleSeconds`, cap the TTL of held and previous builds, `cleanupWhenReady` (wait for ready + exponential backoff). `_*` owners excluded. v1 `cleanupOldBuildKeys` stays (fixed) and is deprecated in 2.x, removed in 3.0.
 
-### 5.6 공개 API 초안
+### 5.6 Public API draft
 
 ```ts
 // "@mirunamu/next-redis-cache"
 export interface RedisCacheConfig {
   client: RedisClientType | (() => RedisClientType | null | Promise<RedisClientType | null>);
-  namespace: string;                                   // 필수
-  buildId?: string;                                    // 기본 process.env.BUILD_ID ?? <distDir>/BUILD_ID
-  timeouts?: { readMs?: number; writeMs?: number };    // 기본 1000 / 2000
-  circuitBreaker?: { openMs?: number } | false;        // 기본 { openMs: 10_000 }
-  fallback?: { buildOutput?: boolean; reseed?: boolean } | false; // 기본 true/true(prod)
+  namespace: string;                                   // required
+  buildId?: string;                                    // default process.env.BUILD_ID ?? <distDir>/BUILD_ID
+  timeouts?: { readMs?: number; writeMs?: number };    // default 1000 / 2000
+  circuitBreaker?: { openMs?: number } | false;        // default { openMs: 10_000 }
+  fallback?: { buildOutput?: boolean; reseed?: boolean } | false; // default true/true (prod)
   ttl?: { staticSeconds?: number; maxSeconds?: number; estimateExpire?: (revalidateSec: number) => number };
-                                                       // 기본 30일 / 365일 / s => Math.floor(s*1.5)
-  onTagExpired?: "stale" | "miss";                     // 기본 "stale"
-  compression?: "none" | "gzip" | "brotli";            // 기본 "none"(P6 재평가)
+                                                       // default 30 days / 365 days / s => Math.floor(s*1.5)
+  onTagExpired?: "stale" | "miss";                     // default "stale"
+  compression?: "none" | "gzip" | "brotli";            // default "none" (re-evaluated in P6)
   logger?: Partial<Record<"debug"|"info"|"warn"|"error", (...a: unknown[]) => void>> | false;
   onEvent?: (e: CacheEvent) => void;
-  disabled?: boolean | (() => boolean);                // 기본: 빌드 페이즈
+  disabled?: boolean | (() => boolean);                // default: build phase
 }
 export function createCacheHandler(config: RedisCacheConfig): new (ctx: unknown) => LegacyCacheHandlerInstance;
 // "@mirunamu/next-redis-cache/use-cache"
@@ -169,443 +170,447 @@ export function connectRedis(url: string | undefined, o?: { waitMs?: number; lab
 // "@mirunamu/next-redis-cache/instrumentation"
 export function startCacheMaintenance(o: { config: RedisCacheConfig;
   cleanup?: { keepPrevious?: number; minIdleSeconds?: number; retiredTtlSeconds?: number; attempts?: number } | false; // 1 / 1800 / 86400 / 10
-  prewarm?: boolean | { concurrency?: number } /* 기본 false */ }): { done: Promise<MaintenanceResult> };
+  prewarm?: boolean | { concurrency?: number } /* default false */ }): { done: Promise<MaintenanceResult> };
 export function cleanupOldBuilds(client: RedisClientType, o: CleanupOptions): Promise<CleanupResult>;
 export function prewarmFromBuildOutput(config: RedisCacheConfig, o?: { concurrency?: number }): Promise<{ prewarmed: number; skipped: number; failed: number }>;
 /** @deprecated */ export function cleanupOldBuildKeys(...): ...;
 ```
 
-### 5.7 docs 래퍼 처리 (P5)
+### 5.7 docs wrapper (P5)
 
-| docs 코드 | 처리 |
+| docs code | Handling |
 |---|---|
-| 디스크 폴백, 태그 판정+`lastModified:-1`, NX 재시드, 무응답 circuit (`cache/resilient-cache-handler.mjs`) | 흡수 |
-| 명시 태그 시각 기록, 자체 `withTimeout` | 버림(v2가 대체) |
-| `connectRedis`·`isBuildPhase` (`cache/redis-connect.mjs`) | 흡수 |
-| 레지스트리 정리·`cleanupWhenReady` (`cache/build-keys.mjs`) | 흡수. 한국어 로그 포매터는 docs 선택 |
-| REDIS_URL 누락 배너 (`src/instrumentation-node.ts`) | docs 유지 |
-| 백그라운드 cleanup/prewarm 조율 | 흡수(`startCacheMaintenance`) |
-| use-cache no-op (`use-cache-handler.mjs`) | 흡수 |
-| `tests/unit/*`, `mini-redis.mjs` | 패키지로 포팅(P0), docs에서는 래퍼와 함께 삭제 |
+| Disk fallback, tag check + `lastModified:-1`, NX re-seed, circuit for unresponsive Redis (`cache/resilient-cache-handler.mjs`) | absorbed |
+| Recording explicit tag times, own `withTimeout` | dropped (replaced by v2) |
+| `connectRedis`, `isBuildPhase` (`cache/redis-connect.mjs`) | absorbed |
+| Registry cleanup, `cleanupWhenReady` (`cache/build-keys.mjs`) | absorbed. The docs log formatter is docs' choice |
+| Missing REDIS_URL banner (`src/instrumentation-node.ts`) | stays in docs |
+| Background cleanup/prewarm coordination | absorbed (`startCacheMaintenance`) |
+| use-cache no-op (`use-cache-handler.mjs`) | absorbed |
+| `tests/unit/*`, `mini-redis.mjs` | ported to the package (P0), deleted from docs together with the wrapper |
 
-docs 최종: `cache/config.mjs`(namespace·BUILD_ID·`connectRedis`·`CACHE_NAMESPACE` 덮어쓰기) + 핸들러 파일 각 3줄 + instrumentation 배너·`startCacheMaintenance({prewarm:false})`. 버전은 프리릴리스 동안 정확 고정(`2.0.0-next.N`), 안정판 후 `^2.0.0`.
+docs end state: `cache/config.mjs` (namespace, BUILD_ID, `connectRedis`, `CACHE_NAMESPACE` override) + 3 lines per handler file + the instrumentation banner and `startCacheMaintenance({prewarm:false})`. Exact version pin during prereleases (`2.0.0-next.N`), `^2.0.0` after the stable release.
 
 ---
 
-## 6. 테스트 환경 설계 (레포 내장, git 커밋)
+## 6. Test environment (in the repo, committed)
 
-### 6.1 디렉토리 구조
+### 6.1 Layout
 
 ```
 next-redis-cache/
-├─ package.json              # 배포 패키지. files:["dist"], workspaces 없음
-├─ tsconfig.json             # 에디터·typecheck(전체) / tsconfig.build.json(src만) / tests는 tsconfig.json이 포함
-├─ tsup.config.ts  eslint.config.mjs  vitest.config.ts  playwright.config.ts(P0c)
-├─ stryker.config.mjs  vitest.mutation.config.ts(P0e)  .size-limit.json  .gitattributes  .nvmrc  LICENSE  ROADMAP.md
-├─ src/
-├─ tests/
-│  ├─ support/               # redis 팩토리, 네임스페이스·DB 할당, waitFor, toxiproxy 클라이언트, mini-redis,
-│  │                         # handlers(핸들러 직접 구동), repro(재현 규약), quarantine(P0d~)
-│  ├─ unit/  property/  integration/  fault/
-│  ├─ contract/{types,oracle}/
-│  ├─ e2e/{static-site,full-legacy,full-cc}/ + fixtures.ts
-│  ├─ chaos/ (harness.ts + 시나리오)  perf/baseline/
-│  └─ fixtures/next-build/   # 7-4 프리워밍 재현용 Next 16.3.6 빌드 산출물 일부
-├─ test-apps/
-│  ├─ static-site/  full-legacy/  full-cc/  _shared/
-│  └─ _variants/{next-16.1,next-16.3,canary}/   # 버전별 package.json(+lock)
-├─ scripts/                  # 전부 Node .mjs
-│  ├─ check-pack.mjs  check-no-hangul.mjs  quality.mjs  coverage-summary.mjs  (P0a)
-│  ├─ infra.mjs  test-all.mjs  (P0b)
-│  ├─ lib/{run,pack-rules,hangul-rules,work}.mjs
-│  ├─ pack.mjs  prepare-app.mjs  origin-server.mjs  fleet.mjs  contract-types.mjs   (P0c)
-│  ├─ perf.mjs   (P0d)
-│  └─ check-quarantine.mjs  junit-summary.mjs  mutation-summary.mjs  nightly-issue.mjs   (P0e)
-├─ docker/
-│  ├─ compose.yml            # 프로필: redis84, redis72, prodlike, toxiproxy, replica
-│  ├─ redis/prodlike.conf
-│  └─ toxiproxy/proxies.json
-└─ .github/workflows/{ci.yml, chaos.yml(재사용), nightly.yml, release.yml}
+|- package.json              # the published package. files:["dist"], no workspaces
+|- tsconfig.json             # editor + typecheck (all) / tsconfig.build.json (src only) / tests are in tsconfig.json
+|- tsup.config.ts  eslint.config.mjs  vitest.config.ts  playwright.config.ts (P0c)
+|- stryker.config.mjs  vitest.mutation.config.ts (P0e)  .size-limit.json  .gitattributes  .nvmrc  LICENSE  ROADMAP.md
+|- src/
+|- tests/
+|  |- support/               # redis factory, namespace/DB allocation, waitFor, toxiproxy client, mini-redis,
+|  |                         # handlers (drive handlers directly), repro (reproduction convention), quarantine (P0d~)
+|  |- unit/  property/  integration/  fault/
+|  |- contract/{types,oracle}/
+|  |- e2e/{static-site,full-legacy,full-cc}/ + fixtures.ts
+|  |- chaos/ (harness.ts + scenarios)  perf/baseline/
+|  `- fixtures/next-build/   # part of a Next 16.3.6 build output for the 7-4 prewarm reproductions
+|- test-apps/
+|  |- static-site/  full-legacy/  full-cc/  _shared/
+|  `- _variants/{next-16.1,next-16.3,canary}/   # per-version package.json (+lock)
+|- scripts/                  # all Node .mjs
+|  |- check-pack.mjs  check-no-hangul.mjs  quality.mjs  coverage-summary.mjs  (P0a)
+|  |- infra.mjs  test-all.mjs  (P0b)
+|  |- lib/{run,pack-rules,hangul-rules,work}.mjs
+|  |- pack.mjs  prepare-app.mjs  origin-server.mjs  fleet.mjs  contract-types.mjs   (P0c)
+|  |- perf.mjs   (P0d)
+|  |- check-quarantine.mjs  junit-summary.mjs  mutation-summary.mjs  nightly-issue.mjs   (P0e)
+|  `- check-commit-messages.mjs   (P1)
+|- docker/
+|  |- compose.yml            # profiles: redis84, redis72, prodlike, toxiproxy, replica
+|  |- redis/prodlike.conf
+|  `- toxiproxy/proxies.json
+`- .github/workflows/{ci.yml, chaos.yml (reusable), nightly.yml, release.yml}
 ```
 
-- 계획 대비: `ci-matrix.mjs`는 만들지 않았다 — 매트릭스는 `fromJSON(inputs.level == 'full' && ... || ...)` 식으로 ci.yml 안에서 계산한다. `tests/perf/scenarios/`는 시나리오가 2개뿐이라 `scripts/perf.mjs` 안에 둔다.
+- Changes vs. plan: there is no `ci-matrix.mjs` - the matrix is computed inside ci.yml with `fromJSON(inputs.level == 'full' && ... || ...)`. `tests/perf/scenarios/` does not exist; the two scenarios live in `scripts/perf.mjs`.
 
-- npm workspaces 미사용(앱별 Next 버전 충돌, 심링크 문제). 테스트 앱은 독립 npm 프로젝트, 루트 스크립트가 조립.
-- 게시물 격리: `files:["dist"]` + `check-pack.mjs`가 `npm pack --dry-run --json` 목록을 `dist/**`, `README.md`, `LICENSE`, `package.json` 화이트리스트와 대조(PR 게이트). exports·main·module·types가 가리키는 파일 누락도 실패.
-- **코드는 영어만(2026-09-29 사용자 결정)**: `.md`를 제외한 모든 파일(src·tests·test-apps·scripts·docker·workflow·설정)에 한글(U+1100–U+11FF, U+3130–U+318F, U+AC00–U+D7AF)이 있으면 `check-no-hangul.mjs`가 실패한다. 주석·JSDoc·문자열·테스트 이름 모두 해당. 마크다운 문서(ROADMAP·README·CHANGELOG)와 커밋 메시지는 한국어 유지. `quality`와 CI static job에 연결. 추적 파일 + 무시되지 않은 미추적 파일을 검사해 커밋 전에도 잡는다.
+- No npm workspaces (per-app Next version conflicts, symlink problems). Test apps are independent npm projects assembled by root scripts.
+- Publish isolation: `files:["dist"]` + `check-pack.mjs` compares the `npm pack --dry-run --json` list with a whitelist of `dist/**`, `README.md`, `LICENSE`, `package.json` (PR gate). Files referenced by exports, main, module or types that are missing also fail.
+- **English only.** (1) 2026-09-29, first user decision: every non-`.md` file (src, tests, test-apps, scripts, docker, workflows, configs) must be free of Hangul (U+1100-U+11FF, U+3130-U+318F, U+AC00-U+D7AF), including comments, JSDoc, strings and test names. (2) 2026-09-29, second user decision (this is a public, international npm package): **Markdown and commit messages are English too.** `check-no-hangul.mjs` now scans every tracked file plus untracked files that are not ignored, Markdown included, so it catches problems before a commit; it runs in `quality` and the CI static job. `check-commit-messages.mjs` (CI static job) fails when any commit message in `origin/master..HEAD` contains Hangul. At the user's request the earlier Korean commit messages on `feat/test-infra` were rewritten to English (trees unchanged) and force-pushed, so no cutoff is needed.
 
-### 6.2 테스트 앱의 패키지 소비
+### 6.2 How the test apps consume the package
 
-- **`npm pack` tarball 설치**(심링크 금지): 실제 소비자와 동일(exports·files·ESM/CJS), peer `next`/`@redis/client`가 앱 쪽으로 해석되어 Next 단일 인스턴스, standalone 트레이싱 정상.
-- lock 충돌 회피: 변형 `package.json`에는 패키지를 넣지 않고 `npm ci` 후 `npm i --no-save <tgz>`. 설치 뒤 `npm ls next @redis/client`로 단일 버전 확인.
-- 로컬 빠른 반복 `--hot-dist`: 새 `dist`를 `.work/<app>/node_modules/.../dist`에 **복사**(CI는 항상 tarball).
-- 기준선 모드 `--pkg npm:1.0.6`: 같은 시나리오를 게시본으로 실행(P0d 재현·기준선).
-- Next 매트릭스: `_variants/next-16.1`·`next-16.3`에 lock 커밋, 앱 소스는 공유하고 `prepare-app`이 `.work/<app>@<variant>/`로 **복사** 조립(Windows 심링크 권한 회피). canary는 lock 없이 nightly·실패 허용. Dependabot이 변형 lock 갱신.
-- **P0c 구현 세부(확정)**
-  - 변형 고정값(2026-09-29 최신 패치): `next-16.1` = next 16.1.7 + react/react-dom 19.2.8, `next-16.3` = next 16.3.6 + react 19.3.0, 공통 `@redis/client` 5.12.1. canary = `next@canary` + `react@latest`, lock 없음.
-  - `pack.mjs`: 작업 트리 → `.artifacts/nrc-local.tgz`(`--no-build`면 기존 dist), `npm:<버전>` → `.artifacts/nrc-npm-<버전>.tgz`(한 번 받으면 재사용).
-  - `prepare-app.mjs <app|all> --variant --pkg local|npm:1.0.6|x.tgz --build A[,B] --api v1 --hot-dist --no-pack`: 변형 lock 해시가 같으면 `npm ci` 생략, tarball 해시가 같으면 재설치 생략, tarball은 상대경로로 `npm install --no-save`. `npm ls next @redis/client --all`로 각 1버전만 있는지 검사(없거나 2개 이상이면 실패). 빌드는 `.next/standalone`을 `builds/<id>/`로 옮기고 `.next/static`·`public`·`_shared`를 복사, `nrc-build.json`(app·variant·buildId·api·next·패키지 버전) 기록.
-  - 빌드는 `next build`를 **비동기 spawn**한다 — origin server가 같은 프로세스에 있어 `spawnSync`면 빌드 중 fetch가 멈춘다(실제로 use-cache 채움 타임아웃으로 빌드가 실패했다).
-  - next.config는 `outputFileTracingRoot`·`turbopack.root`를 앱 디렉토리로 고정한다(레포 루트의 package-lock.json을 워크스페이스 루트로 오인하지 않게). standalone의 `cacheHandler` 경로는 Next가 distDir 기준 상대경로로 기록하므로 `builds/<id>/`로 옮겨도 동작한다.
-  - Windows: 빌드 직후 새 파일(static-site 약 3,300개)을 처음 열 때 Defender 검사로 193초가 걸려 첫 기동이 fleet 준비 타임아웃(120초)을 넘겼다. `prepare-app`이 빌드 직후 모든 파일을 한 번 읽어 그 비용을 흡수한다(`.work/`를 Defender 예외로 두면 즉시). Linux CI는 해당 없음.
+- **Install the `npm pack` tarball** (no symlinks): identical to a real consumer (exports, files, ESM/CJS), peers `next`/`@redis/client` resolve inside the app -> one Next instance, standalone tracing works.
+- Avoiding lock conflicts: the variant `package.json` does not list the package; `npm ci`, then `npm i --no-save <tgz>`. After installing, `npm ls next @redis/client` must show one version each.
+- Fast local iteration `--hot-dist`: **copy** the new `dist` into `.work/<app>/node_modules/.../dist` (CI always uses the tarball).
+- Baseline mode `--pkg npm:1.0.6`: run the same scenario with the published package (P0d reproductions and baselines).
+- Next matrix: `_variants/next-16.1` and `next-16.3` commit a lock; app sources are shared and `prepare-app` **copies** them into `.work/<app>@<variant>/` (avoids Windows symlink permissions). canary has no lock, nightly only, allowed to fail. Dependabot updates the variant locks.
+- **P0c implementation details (final)**
+  - Pinned variants (latest patches on 2026-09-29): `next-16.1` = next 16.1.7 + react/react-dom 19.2.8, `next-16.3` = next 16.3.6 + react 19.3.0, both `@redis/client` 5.12.1. canary = `next@canary` + `react@latest`, no lock.
+  - `pack.mjs`: working tree -> `.artifacts/nrc-local.tgz` (`--no-build` uses the existing dist), `npm:<version>` -> `.artifacts/nrc-npm-<version>.tgz` (downloaded once, reused).
+  - `prepare-app.mjs <app|all> --variant --pkg local|npm:1.0.6|x.tgz --build A[,B] --api v1 --hot-dist --no-pack`: skips `npm ci` when the variant lock hash is unchanged, skips reinstalling when the tarball hash is unchanged, installs the tarball by relative path with `npm install --no-save`. Checks with `npm ls next @redis/client --all` that each has exactly one version. A build moves `.next/standalone` to `builds/<id>/`, copies `.next/static`, `public` and `_shared`, and writes `nrc-build.json` (app, variant, buildId, api, next, package version).
+  - `next build` is **spawned asynchronously** - the origin server lives in the same process, and `spawnSync` froze its fetches during the build (the build actually failed with a use-cache fill timeout).
+  - next.config pins `outputFileTracingRoot` and `turbopack.root` to the app directory (so the repo root's package-lock.json is not mistaken for a workspace root). Next writes the standalone `cacheHandler` path relative to distDir, so moving it to `builds/<id>/` works.
+  - Windows: right after a build, opening the new files (static-site ~3,300) for the first time took 193 s because of Defender scans and the first start exceeded the fleet readiness timeout (120 s). `prepare-app` reads every file once right after the build to absorb that cost (instant with a Defender exclusion for `.work/`). Not an issue on Linux CI.
 
-### 6.3 테스트 앱
+### 6.3 Test apps
 
-공통: `output:"standalone"`, `generateBuildId=BUILD_ID`, `cacheMaxMemorySize:0`, `cacheHandler`+`cacheHandlers.default/remote` = `_shared` 핸들러, `NRC_API=v1|v2` 어댑터, `TEST_NS`·`REDIS_URL` 환경변수, `node .next/standalone/server.js`로 기동.
+Common: `output:"standalone"`, `generateBuildId=BUILD_ID`, `cacheMaxMemorySize:0`, `cacheHandler` + `cacheHandlers.default/remote` = the `_shared` handlers, `NRC_API=v1|v2` adapter, env `TEST_NS` and `REDIS_URL`, started with `node .next/standalone/server.js`.
 
-관측성(`TEST_HOOKS=1`에서만): 모든 응답에 `data-build`·`data-render-id`(UUID)·`data-rendered-at`·`data-instance`, `/api/__test/stats`(onEvent 카운터), `/api/__test/unhandled`(unhandledRejection 수). **origin server**: `GET /data/:key?delay=ms`(버전 반환·호출 카운트), `POST /data/:key`(버전 증가), `GET /hits`.
+Observability (only with `TEST_HOOKS=1`): every response carries `data-build`, `data-render-id` (UUID), `data-rendered-at`, `data-instance`; `/api/__test/stats` (onEvent counters), `/api/__test/unhandled` (unhandledRejection count). **origin server**: `GET /data/:key?delay=ms` (returns a version, counts calls), `POST /data/:key` (bumps the version), `GET /hits`.
 
-- **static-site**(docs 패턴): `/docs/[...slug]` 약 120개 `dynamicParams=false`, 중첩 layout·route group, seed 기반 200~500KB 본문 / `/`·`/about`·`not-found` / `/api/og/docs/[...slug]` force-static PNG 약 50개 / `icon.tsx` / `instrumentation.ts`.
-- **full-legacy**(cacheComponents off): `/isr/[id]` revalidate=2, `/pinned/[id]` dynamicParams=false+태그 fetch, `/fetch-tags`, 라우트 핸들러(force-static, revalidate=5), 서버 액션(`revalidateTag` 무/‘max’/{expire}, `revalidatePath`), `/race/[k]`(origin 지연 중 무효화).
-- **full-cc**(cacheComponents on): `"use cache"`+`cacheTag`+`cacheLife('hours')`, 커스텀 `short`{revalidate:2,expire:10}, `"use cache: remote"`, PPR 페이지(`postponed` 보존), `updateTag` 액션, 세그먼트 prefetch 대상.
-- 앱을 나누는 이유: Next 16에서 cacheComponents와 `export const revalidate/dynamic` 동시 사용 불가로 알고 있음 — **P0c 첫 빌드에서 확인**.
-- **P0c 확인 결과·구현 세부(확정)**
-  - **cacheComponents 제약 확인**: full-cc(16.3.6) 페이지에 `export const revalidate = 60` → `Route segment config "revalidate" is not compatible with nextConfig.cacheComponents. Please remove it.`, `export const dynamic = "force-dynamic"` → 같은 오류(`"dynamic"`)로 빌드 실패. 앱 분리 유지.
-  - 앱은 **JS(.jsx/.mjs)** 로 작성했다(계획은 TS). 변형에 typescript를 넣지 않아 설치·빌드가 가볍고, 타입 검증은 contract-types가 맡는다.
-  - 테스트 훅 경로는 `/api/nrc-test/stats`·`/api/nrc-test/unhandled`다 — `__test`처럼 `_`로 시작하는 폴더는 App Router의 private folder라 라우트가 되지 않는다.
-  - `NRC_API=v1` 어댑터(`_shared/cache-handler.mjs`·`use-cache-handler.mjs`)는 **README Quick Start 배선을 그대로** 쓴다(onCreation 안에서 `await client.connect()`, use-cache는 top-level await). 재현 테스트가 실제 사용자가 겪는 것을 보려면 문서 배선이어야 한다. 카운터는 서브클래스·래퍼로만 붙인다. `NRC_API=v2`는 P2에서 채운다(지금은 명시적 오류).
-  - instrumentation 플래그: `NRC_PREWARM=1`(README Step 4의 `registerInitialCache`, await), `NRC_CLEANUP=1`(`cleanupOldBuildKeys` keepPrefix=자기 빌드, await). e2e 기본값은 static-site·full-legacy에 prewarm on — 1.0.6은 빈 Redis에서 `dynamicParams=false` 페이지가 404라서다(이 자체가 A2 재현).
-  - 마커: TEST_HOOKS=1일 때 `<div id="nrc-test" data-build data-render-id data-rendered-at data-instance>`. full-cc는 cacheComponents에서 `Date.now()`·`randomUUID()`를 캐시 스코프 밖에서 못 쓰므로 마커를 `"use cache"` 컴포넌트 안에 넣는다(= 캐시 항목 생성 시점).
-  - static-site 본문은 페이지당 텍스트 100~250KB(HTML은 RSC 인라인 때문에 약 2배 → 200~500KB). 처음엔 텍스트 200~500KB로 만들었더니 HTML이 최대 1MB, 1벌이 Redis 약 200MB라 로컬 반복이 무거웠다.
-  - full-cc: 수명이 짧은 캐시(`short`, expire 10s < 5분)와 `"use cache: remote"`는 정적 셸에서 빠지므로 `<Suspense>` 안에 둔다. PPR 셸의 캐시 컴포넌트는 origin fetch를 하지 않는다(동적 구멍에서 프리렌더가 중단될 때 진행 중 fetch가 "Filling a cache during prerender timed out"으로 보고됨). `/dyn/[id]`(요청마다 use-cache 조회)는 chaos·perf용으로 추가.
-  - full-legacy `/pinned/[id]`는 테스트 간 격리를 위해 id 1~6.
-  - 서버 액션은 브라우저 없이 JS 없는 폼 제출(숨은 `$ACTION_ID_*` 필드를 multipart로 POST)로 호출한다 → e2e에 Playwright 브라우저가 필요 없다(CI에서 chromium 설치 생략).
+- **static-site** (docs pattern): `/docs/[...slug]` ~120 pages with `dynamicParams=false`, nested layouts and route groups, seeded 200..500 KB bodies / `/`, `/about`, `not-found` / `/api/og/docs/[...slug]` force-static PNGs (~50) / `icon.tsx` / `instrumentation.ts`.
+- **full-legacy** (cacheComponents off): `/isr/[id]` revalidate=2, `/pinned/[id]` dynamicParams=false + tagged fetch, `/fetch-tags`, route handlers (force-static, revalidate=5), server actions (`revalidateTag` without profile / 'max' / {expire}, `revalidatePath`), `/race/[k]` (invalidation while the origin is slow).
+- **full-cc** (cacheComponents on): `"use cache"` + `cacheTag` + `cacheLife('hours')`, custom `short` {revalidate:2, expire:10}, `"use cache: remote"`, PPR page (`postponed` preserved), `updateTag` action, segment prefetch targets.
+- Why separate apps: on Next 16 cacheComponents cannot be combined with `export const revalidate/dynamic` - **confirmed in the first P0c build**.
+- **P0c findings and implementation details (final)**
+  - **cacheComponents constraint confirmed**: a full-cc (16.3.6) page with `export const revalidate = 60` -> `Route segment config "revalidate" is not compatible with nextConfig.cacheComponents. Please remove it.`, `export const dynamic = "force-dynamic"` -> the same error (`"dynamic"`). The apps stay separate.
+  - The apps are written in **JS (.jsx/.mjs)** (plan: TS). The variants need no typescript, installs and builds are lighter; contract-types checks the types.
+  - Test hook paths are `/api/nrc-test/stats` and `/api/nrc-test/unhandled` - folders starting with `_` such as `__test` are App Router private folders and do not become routes.
+  - The `NRC_API=v1` adapters (`_shared/cache-handler.mjs`, `use-cache-handler.mjs`) use **the 1.0.x README Quick Start wiring as-is** (`await client.connect()` inside onCreation, top-level await for use-cache). Reproductions must see what real users see, so the wiring must be the documented one. Counters are added only by subclassing/wrapping. `NRC_API=v2` is filled in P2 (an explicit error for now).
+  - instrumentation flags: `NRC_PREWARM=1` (README Step 4 `registerInitialCache`, awaited), `NRC_CLEANUP=1` (`cleanupOldBuildKeys` keepPrefix = own build, awaited). e2e defaults: prewarm on for static-site and full-legacy - on 1.0.6 `dynamicParams=false` pages 404 on an empty Redis (itself the A2 reproduction).
+  - Marker: with TEST_HOOKS=1, `<div id="nrc-test" data-build data-render-id data-rendered-at data-instance>`. With cacheComponents `Date.now()`/`randomUUID()` cannot be used outside a cache scope, so full-cc puts the marker inside a `"use cache"` component (= when the cache entry was created).
+  - static-site body text is 100..250 KB per page (HTML is about 2x because of the inlined RSC -> 200..500 KB). 200..500 KB of text at first made HTML up to 1 MB and one build ~200 MB in Redis - too heavy for local iteration.
+  - full-cc: short-lived caches (`short`, expire 10 s < 5 min) and `"use cache: remote"` drop out of the static shell, so they sit inside `<Suspense>`. Cached components in the PPR shell do not fetch the origin (in-flight fetches when the prerender stops at a dynamic hole were reported as "Filling a cache during prerender timed out"). `/dyn/[id]` (use-cache lookup on every request) was added for chaos and perf.
+  - full-legacy `/pinned/[id]` uses ids 1..6 to isolate tests.
+  - Server actions are invoked without a browser by submitting the JS-less form (the hidden `$ACTION_ID_*` field as multipart POST) -> e2e needs no Playwright browser (CI skips the chromium install).
 
-### 6.4 인프라
+### 6.4 Infrastructure
 
-- **docker compose**(`docker/compose.yml`, 호스트 포트 env로 덮어쓰기 가능)
-  - `redis84`(기본, `redis:8.4`, `requirepass test`), `redis72`(HEXPIRE 없는 하한)
-  - `prodlike`: 운영(`helm-chart/mirunamu/redis/values.yaml`) 흉내 — AOF everysec + RDB save, `volatile-lru`, `requirepass`, maxmemory는 compose 명령 인자로 16mb/384mb 전환
-  - `toxiproxy`: `redis84`·`prodlike` 앞단 프록시, 제어 API 8474를 테스트가 HTTP로 직접 호출(latency/jitter, timeout, reset_peer, bandwidth, limit_data)
-  - `replica`(선택): 복제 구성만 흉내(failover 비목표)
-  - 기본 bridge + 포트 매핑(`network_mode: host` 금지 — Windows 미지원)
-- **역할 분담**: testcontainers = integration(파일 단위 자립, 무작위 포트, 버전 파라미터화) / compose = e2e·chaos·perf·fault(toxiproxy)·수동 디버깅.
-- **P0b 구현 세부(확정)**
-  - compose 프로젝트명 `nrc`. 호스트 포트 기본값: redis84 `6384`, redis72 `6372`, prodlike `6390`, replica `6391`, toxiproxy API `8474`, 정적 프록시 `26384`(→redis84)·`26390`(→prodlike). 각각 `NRC_*_PORT` env로 덮어쓰기.
-  - `infra:up` 기본 프로필 = redis84·redis72·toxiproxy. `npm run infra:up -- prodlike`처럼 인자로 지정, `all`은 전부. prodlike는 `prodlike`·`replica` 두 프로필에 속한다(replica의 primary). `infra:down`은 모든 프로필 + 볼륨 삭제.
-  - toxiproxy 격리: vitest 워커마다 전용 프록시 `nrc_w<poolId>`를 `26399+poolId` 포트에 만든다(26400–26415 매핑 → **워커 최대 16개**). 한 워커 안의 테스트 파일은 순차라 프록시를 동시에 공유하지 않는다. 전역 `/reset`은 병렬 테스트에서 쓰지 않는다.
-  - Redis 버전 선택: `NRC_REDIS_VERSIONS`(쉼표 목록, 기본 `8.4,7.2`). CI는 셀마다 하나.
-  - testcontainers는 `~12.0.4` 고정 — 12.1+는 `engines.node >=22.22`라 로컬 Node 22.21에서 경고. 로컬 Node를 22.22+로 올리면 해제 가능.
-  - mini-redis TS 포팅은 원본 대비 값 바이너리 안전(Buffer 저장), `AUTH`(password 옵션)·`PTTL`·`SET PX`·`DBSIZE`·`HGETALL`·`FLUSHDB` 추가, `connectionCount()`·`getBuffer()` 추가.
-- **멀티 인스턴스·롤링**(`scripts/fleet.mjs`, P0c): BUILD_ID A/B 산출물 2벌, 인스턴스 2~3개(get-port, `INSTANCE_ID`, toxiproxy 경유 공유 Redis), 내장 라운드로빈 LB, 롤링 A→B(`maxSurge 1, maxUnavailable 0` 재현)와 롤백 B→A, 종료는 tree-kill.
-  - 구현(계획 대비): get-port·tree-kill 의존성 없이 포트는 `listen(0)`으로 받고, `node server.js`를 셸 없이 직접 spawn하므로 자식 프로세스만 종료하면 된다(SIGTERM 5초 후 SIGKILL). 준비 판정은 `/api/nrc-test/stats` 200(기본 120초). LB는 응답에 `x-nrc-upstream`을 붙인다. 스스로 종료한 인스턴스는 `fleet.crashed`(I2). `stop()`은 네임스페이스 키를 SCAN+UNLINK로 지운다(`NRC_KEEP_KEYS=1`이면 남김) — 안 지우면 e2e 몇 번에 로컬 Redis가 1.5GB까지 찼다. 인스턴스 로그는 `.work/logs/<app>@<variant>/<ns>/<id>.log`.
-- **Windows**: 스크립트 전부 Node, `.gitattributes` eol=lf, 짧은 `.work` 경로, testcontainers는 Docker Desktop npipe. **GitHub windows 러너는 Linux 컨테이너 불가** → Windows CI는 docker 불필요 계층만.
+- **docker compose** (`docker/compose.yml`, host ports overridable by env)
+  - `redis84` (default, `redis:8.4`, `requirepass test`), `redis72` (lower bound without HEXPIRE)
+  - `prodlike`: mimics production (`helm-chart/mirunamu/redis/values.yaml`) - AOF everysec + RDB save, `volatile-lru`, `requirepass`, maxmemory switched between 16mb/384mb by a compose command argument
+  - `toxiproxy`: proxy in front of `redis84` and `prodlike`; tests call the control API on 8474 over HTTP (latency/jitter, timeout, reset_peer, bandwidth, limit_data)
+  - `replica` (optional): only mimics replication (failover is a non-goal)
+  - default bridge + port mapping (no `network_mode: host` - unsupported on Windows)
+- **Split**: testcontainers = integration (self-contained per file, random ports, parameterized versions) / compose = e2e, chaos, perf, fault (toxiproxy), manual debugging.
+- **P0b implementation details (final)**
+  - Compose project name `nrc`. Default host ports: redis84 `6384`, redis72 `6372`, prodlike `6390`, replica `6391`, toxiproxy API `8474`, static proxies `26384` (-> redis84) and `26390` (-> prodlike). Each can be overridden with `NRC_*_PORT`.
+  - `infra:up` default profiles = redis84, redis72, toxiproxy. Pass profiles as arguments, e.g. `npm run infra:up -- prodlike`; `all` starts everything. prodlike belongs to both `prodlike` and `replica` (the replica's primary). `infra:down` removes every profile + volumes.
+  - toxiproxy isolation: each vitest worker creates its own proxy `nrc_w<poolId>` on port `26399+poolId` (mapped 26400-26415 -> **at most 16 workers**). Test files inside one worker run sequentially, so a proxy is never shared concurrently. The global `/reset` is never used in parallel tests.
+  - Redis versions: `NRC_REDIS_VERSIONS` (comma list, default `8.4,7.2`). CI uses one per cell.
+  - testcontainers pinned to `~12.0.4` - 12.1+ declares `engines.node >=22.22` and warns on the local Node 22.21. Can be lifted once local Node is 22.22+.
+  - The mini-redis TS port stores values binary-safe (Buffer), adds `AUTH` (password option), `PTTL`, `SET PX`, `DBSIZE`, `HGETALL`, `FLUSHDB`, plus `connectionCount()` and `getBuffer()`. It speaks RESP2 only (no `HELLO`).
+- **Multiple instances and rolling updates** (`scripts/fleet.mjs`, P0c): two builds with BUILD_ID A/B, 2..3 instances (get-port, `INSTANCE_ID`, shared Redis through toxiproxy), built-in round-robin LB, rolling A->B (`maxSurge 1, maxUnavailable 0`) and rollback B->A, shutdown with tree-kill.
+  - Implementation (vs. plan): no get-port/tree-kill dependencies - ports come from `listen(0)`, and `node server.js` is spawned directly without a shell, so killing the child is enough (SIGTERM, SIGKILL after 5 s). Readiness = `/api/nrc-test/stats` 200 (default 120 s). The LB adds `x-nrc-upstream` to responses. Instances that exit on their own are listed in `fleet.crashed` (I2). `stop()` removes the namespace's keys with SCAN+UNLINK (kept with `NRC_KEEP_KEYS=1`) - without it the local Redis reached 1.5 GB after a few e2e runs. Instance logs go to `.work/logs/<app>@<variant>/<ns>/<id>.log`.
+- **Windows**: all scripts are Node, `.gitattributes` eol=lf, short `.work` path, testcontainers over the Docker Desktop npipe. **GitHub Windows runners cannot run Linux containers** -> Windows CI runs only the layers that need no Docker.
 
-### 6.5 테스트 계층
+### 6.5 Test layers
 
-| 계층 | 도구 | 목적 | 예산 | 트리거 |
+| Layer | Tool | Purpose | Budget | Trigger |
 |---|---|---|---|---|
-| unit | vitest `unit`, 가짜 시계 | 키·엔벨로프·TTL·태그 판정·circuit·로거 | <30s | PR(Node 22/24, Windows) |
-| property | fast-check | 엔벨로프 왕복, TTL 단조·상한, 태그 판정 ≡ Next 참조 구현 | <30s | PR |
-| integration | testcontainers Redis 7.2/8.4 | 명령 의미, NX, TTL(`PTTL` 범위), 축출, 정리, 1만 키 배치 | <3m | PR |
-| fault | mini-redis + toxiproxy | 연결 전·끊김·재연결·무응답·지연·reset_peer, unhandledRejection 0, offline queue 폭주 0 | <3m | PR(mini-redis 부분은 Windows 포함). vitest project `fault`(mini-redis, 도커 불필요) + `fault-docker`(파일명 `*.docker.test.ts`, compose toxiproxy 필요) |
-| contract-types | tsc 버전별 | `satisfies next/.../cache-handlers/types#CacheHandler` | <1m/버전 | PR(16.1/16.3), nightly(canary) |
-| contract-oracle | vitest + fast-check | 연산 시퀀스를 Next `createDefaultCacheHandler`와 우리 핸들러(`swr:false`)에 적용해 결과 차분 | <1m | PR |
-| e2e | Playwright + fleet 2인스턴스 | HTML·RSC·세그먼트 prefetch, SWR, 인스턴스 간 전파, 404 0, sitemap 200 | <8m/셀 | PR 16.3×8.4×3앱 / nightly 전체 |
-| chaos | vitest 장시간 + fleet + toxiproxy | C1~C14, 불변식 I1~I5 | <15m | nightly, 릴리스 전 |
-| perf | autocannon | 히트 p50/p99, 요청당 Redis 왕복 수, 빌드 1벌 메모리 | <10m | nightly(결정론 지표는 PR) |
-| mutation | Stryker(vitest runner) | 코어 모듈 테스트 품질 | <60m | weekly |
+| unit | vitest `unit`, fake clock | keys, envelope, TTL, tag checks, circuit, logger | <30s | PR (Node 22/24, Windows) |
+| property | fast-check | envelope round trip, TTL monotonic and capped, tag checks == Next reference | <30s | PR |
+| integration | testcontainers Redis 7.2/8.4 | command semantics, NX, TTL (`PTTL` ranges), eviction, cleanup, 10k-key batches | <3m | PR |
+| fault | mini-redis + toxiproxy | before connect, disconnect, reconnect, unresponsive, latency, reset_peer; zero unhandledRejection, no offline-queue burst | <3m | PR (the mini-redis part on Windows too). vitest project `fault` (mini-redis, no Docker) + `fault-docker` (files `*.docker.test.ts`, needs compose toxiproxy) |
+| contract-types | tsc per version | `satisfies next/.../cache-handlers/types#CacheHandler` | <1m/version | PR (16.1/16.3), nightly (canary) |
+| contract-oracle | vitest + fast-check | apply operation sequences to Next's `createDefaultCacheHandler` and ours (`swr:false`) and diff | <1m | PR |
+| e2e | Playwright + 2-instance fleet | HTML, RSC, segment prefetch, SWR, propagation across instances, zero 404, sitemap 200 | <8m/cell | PR 16.3 x 8.4 x 3 apps / nightly all |
+| chaos | long-running vitest + fleet + toxiproxy | C1..C14, invariants I1..I5 | <15m | nightly, before a release |
+| perf | autocannon | hit p50/p99, Redis round trips per request, memory of one build | <10m | nightly (deterministic metrics on PR) |
+| mutation | Stryker (vitest runner) | quality of the core module tests | <60m | weekly |
 
-**chaos**: C1 기동 시 Redis 부재, C2 트래픽 중 kill, C3 무응답, C4 지연 300ms+jitter, C5 reset_peer, C6 FLUSHALL, C7 축출 압박(16mb), C8 AOF 재시작(태그 상태 롤백), C9 잘못된 비밀번호, C10 WRONGTYPE, C11 롤링 A→B, C12 롤백 B→A, C13 느린 렌더 중 무효화, C14 클럭 스큐(`TEST_CLOCK_OFFSET_MS`).
+**chaos**: C1 Redis absent at startup, C2 killed under traffic, C3 unresponsive, C4 latency 300 ms + jitter, C5 reset_peer, C6 FLUSHALL, C7 eviction pressure (16mb), C8 AOF restart (tag state rolls back), C9 wrong password, C10 WRONGTYPE, C11 rolling A->B, C12 rollback B->A, C13 invalidation during a slow render, C14 clock skew (`TEST_CLOCK_OFFSET_MS`).
 
-**불변식**: I1 prerender 경로 404/5xx 0 · I2 비정상 종료·unhandledRejection 0 · I3 지연 상한 · I4 복구 후 10s 내 히트 재개 · I5 Redis 정상 시 무효화 이후 옛 데이터 fresh 응답 0.
+**Invariants**: I1 zero 404/5xx on prerendered routes, I2 zero abnormal exits and unhandledRejections, I3 latency bound, I4 hits resume within 10 s after recovery, I5 with a healthy Redis no old data is served as fresh after an invalidation.
 
-**perf 게이트**: 결정론 지표(요청당 왕복 수 = `INFO commandstats` 차분, 레거시 히트 ≤2·use-cache 히트 ≤2 / 빌드 1벌 `MEMORY USAGE` 합 기준선 +5% 이내)는 PR 하드 게이트. 시간 지표(p50/p99)는 nightly 3회 중앙값, 기준선 +20% 초과 시 경고만.
+**perf gate**: deterministic metrics (round trips per request = `INFO commandstats` delta, legacy hit <= 2 and use-cache hit <= 2 / `MEMORY USAGE` sum of one build within +5% of the baseline) are a hard PR gate. Timing (p50/p99) is the median of 3 nightly runs; above +20% of the baseline only warns.
 
-**P0c~P0d 구현 세부(확정)**
+**P0c..P0d implementation details (final)**
 
-- **재현(기대 실패) 규약** — 재현 테스트는 *올바른 동작*을 단언하고 기대 실패로 등록한다. 수정되면 테스트가 통과 → 러너가 "기대 실패인데 통과"로 실패 → 수정 커밋이 표식을 지워야만 green.
-  - vitest: `itRepro("7-x", "...", fn)`(`tests/support/repro.ts`, 내부는 `it.fails`) → 수정 시 `it("[7-x] ...")`로 교체.
-  - Playwright: 테스트 첫 줄 `repro("7-x", "원인")`(`test.fail`) → 수정 시 삭제.
-  - tsc(contract-types): `// @ts-expect-error [7-x] ...` → 수정 시 "Unused @ts-expect-error"로 실패하므로 삭제.
-  - `NRC_REPRO=show`면 셋 다 일반 테스트로 돌아 실제 실패 메시지를 출력한다(재현 증거). 남은 재현은 `grep -rn "\[7-" tests`로 본다.
-  - 제목에 ID를 넣는다: `[7-x]`(2절 문제) 또는 `[A2]`(수용 기준 — 버그 번호가 없는 것).
-- **contract-types**: `scripts/contract-types.mjs --variant next-16.1|next-16.3|canary|all --pkg`가 `.work/contract@<variant>/`에 변형 의존성+tarball을 설치하고 `tests/contract/types/*.contract.mts`(NodeNext, ESM 소비자 관점)를 레포의 tsc로 컴파일한다. 루트 typecheck에서는 제외.
-- **contract-oracle**: `tests/contract/oracle/use-cache.oracle.test.ts`. fast-check 프로그램(set/get/updateTags/시간 경과)을 Next `createDefaultCacheHandler`와 우리 핸들러(mini-redis)에 적용하고, Next use-cache wrapper가 get 결과로 내릴 판정(`miss`/`hit`/`stale`, `getExpiration` 결과 ≥ timestamp면 폐기)을 비교한다. 시간은 `Date.now`·`performance.now`를 가상 시계로 바꿔 두 핸들러와 mini-redis 만료가 같은 시계를 본다. 비교 대상은 루트 devDependency의 Next(현재 16.1.6). docker 불필요라 `npm test`에 포함(vitest project `contract`).
-- **chaos 구현 범위(P0d)**: 6.9 매핑의 C1·C9·C2·C5·C6·C13·C11·C12(`tests/chaos/*.test.ts`, vitest project `chaos`, 파일 순차). 전제: `infra:up -- redis84 toxiproxy`, static-site A·B / full-legacy A / full-cc A 빌드. C3·C4·C7·C8·C10·C14는 해당 기능 단계(P3·P4·P6)에서 추가.
-- **perf 지표 정의(계획 대비)**: "왕복 수" 대신 **요청당 Redis 명령 수**를 잰다. `INFO commandstats`는 서버 전역이라 다른 트래픽이 섞이므로, 별도 연결의 `MONITOR`로 이번 네임스페이스 키를 건드린 명령만 센다. 키 모양으로 핸들러를 가른다(`uc:` = use-cache, `_tags`·`_tagTtls`·`_revalidated` = 태그 상태, 나머지 = 레거시). use-cache 시나리오는 `/dyn/1`(PPR 셸은 레거시, 동적 부분이 use-cache)이라 두 핸들러 합계다. 게이트: 명령 수는 기준선 초과 금지, 메모리는 같은 Redis 마이너일 때 +5% 이내. 시간 지표는 `--time`(autocannon 10초, 8연결).
+- **Reproduction (expected failure) convention** - a reproduction asserts the *correct* behavior and is registered as an expected failure. Once fixed the test passes -> the runner fails with "expected to fail but passed" -> the fixing commit must remove the marker to be green.
+  - vitest: `itRepro("7-x", "...", fn)` (`tests/support/repro.ts`, `it.fails` inside) -> replaced by `it("[7-x] ...")` when fixed.
+  - Playwright: first line `repro("7-x", "reason")` (`test.fail`) -> deleted when fixed.
+  - tsc (contract-types): `// @ts-expect-error [7-x] ...` -> fails with "Unused @ts-expect-error" when fixed, so it is deleted.
+  - With `NRC_REPRO=show` all three run as regular tests and print the actual failures (reproduction evidence). Remaining reproductions: `grep -rn "\[7-" tests`.
+  - Titles carry the ID: `[7-x]` (section 2 issue) or `[A2]` (acceptance criterion without an issue number).
+- **contract-types**: `scripts/contract-types.mjs --variant next-16.1|next-16.3|canary|all --pkg` installs the variant's dependencies + the tarball into `.work/contract@<variant>/` and compiles `tests/contract/types/*.contract.mts` (NodeNext, ESM consumer) and, since P1, `*.contract.cts` (CommonJS consumer through the `require` condition) with the repo's tsc. Not part of the root typecheck.
+- **contract-oracle**: `tests/contract/oracle/use-cache.oracle.test.ts`. fast-check programs (set/get/updateTags/time passing) are applied to Next's `createDefaultCacheHandler` and to our handler (mini-redis), and the verdict Next's use-cache wrapper would derive from each get (`miss`/`hit`/`stale`, discarded when the `getExpiration` result >= timestamp) is compared. `Date.now`/`performance.now` are replaced by a virtual clock so both handlers and the mini-redis expiry see the same time. The reference is the root devDependency Next (currently 16.1.6). No Docker, so it is part of `npm test` (vitest project `contract`).
+- **chaos scope (P0d)**: C1, C9, C2, C5, C6, C13, C11, C12 from the 6.9 mapping (`tests/chaos/*.test.ts`, vitest project `chaos`, files sequential). Requires `infra:up -- redis84 toxiproxy` and builds of static-site A and B, full-legacy A, full-cc A. C3, C4, C7, C8, C10, C14 are added in the phase that implements the feature (P3, P4, P6).
+- **perf metric definition (vs. plan)**: measures **Redis commands per request** instead of "round trips". `INFO commandstats` is server-global and mixes other traffic, so `MONITOR` on a separate connection counts only commands touching this run's namespace. The key shape tells the handler apart (`uc:` = use-cache, `_tags`/`_tagTtls`/`_revalidated` = tag state, the rest = legacy). The use-cache scenario is `/dyn/1` (PPR shell = legacy, dynamic part = use-cache), so it is the sum of both handlers. Gate: commands must not exceed the baseline, memory within +5% on the same Redis minor. Timing via `--time` (autocannon 10 s, 8 connections).
 
-### 6.6 품질 게이트와 결정론
+### 6.6 Quality gates and determinism
 
-- 커버리지(v8, unit+property+integration+fault 병합, `src/**`): lines 90 / branches 85 / functions 90, 파일별 lines ≥80 — **2.0.0 전까지 리포트만, 2.0.0부터 차단**.
-- `tsc --noEmit`(strict) + contract-types, `publint`, `attw --profile node16`(조건별 types 오류 0), `check-pack` 화이트리스트, `check-no-hangul`, size 예산(엔트리별 ESM gzip, 초기 측정치 +20%), eslint 0 오류, mutation ≥70%(2.0.0부터 차단).
-  - P0a 실제값: attw는 P1(조건별 types 교정) 전까지 `false-esm` 규칙만 무시 — **P1에서 예외 제거**(exports 조건별 `{types, default}`, attw `--profile node16` 예외 없이 통과). size-limit은 `@size-limit/file`로 엔트리 파일+공유 청크의 gzip 크기를 잰다(dist가 minify되지 않으므로 "min+gz"가 아니라 배포물 그대로의 gz). 1.0.6 기준 `.` 4.12kB→예산 5kB, `./use-cache` 3.14kB→3.8kB, `./instrumentation` 1.69kB→2.1kB, CJS 합계 7.5kB→9kB. 별도 `size.mjs` 없이 `.size-limit.json`만 둔다.
-  - P1 재설정(같은 +20% 규칙, 1.1.0 산출물 기준): `.` 5.47kB→6.6kB, `./use-cache` 4.5kB→5.4kB, `./instrumentation` 1.71kB→2.1kB(유지), CJS 8.99kB→10.8kB.
-  - 커버리지는 P0a/P0b 시점 CI에서 unit+property만 수집. integration·fault 병합은 P0e(리포팅)에서.
-- flaky: 재시도 금지(`retry:0`, Playwright `retries:0`). 불안정 테스트는 `@quarantine` 태그로 게이트 제외 + 추적 이슈 + 7일 내 수정/삭제, nightly `--repeat-each=20`.
-  - 구현(P0e): vitest는 `itQuarantine("#<이슈> until YYYY-MM-DD", name, fn)`(`tests/support/quarantine.ts`) — 평소 skip, `NRC_QUARANTINE=only`면 그것만 `repeats: 20`. Playwright는 제목에 `@quarantine(#<이슈> until YYYY-MM-DD)`, config가 평소 `grepInvert`, `NRC_QUARANTINE=only`면 `grep`. `scripts/check-quarantine.mjs`(CI static)가 이슈 번호·기한 형식, 기한 경과, 7일 초과를 실패시킨다(음성 시험: 지난 기한·형식 위반 주입 시 exit 1 확인). nightly `quarantine` job이 x20 반복.
-- 리포팅: vitest JUnit·JSON·coverage(lcov/html), Playwright html+trace+JUnit, perf JSON → artifact, 요약은 `$GITHUB_STEP_SUMMARY`. 외부 서비스 없음.
-  - 구현(P0e): `scripts/junit-summary.mjs`가 JUnit(vitest `reports/junit.xml`, Playwright `reports/e2e-junit.xml`)을 표로 요약. 커버리지는 unit(Node 22)·integration(7.2/8.4)·fault job이 `NRC_BLOB=<이름>`으로 blob 리포트(커버리지 포함)를 남기고, ci `coverage` job이 `vitest --merge-reports`로 합쳐 `coverage-summary.mjs`로 요약(리포트 전용, gate 밖). perf는 `reports/perf.json`+요약, mutation은 `scripts/mutation-summary.mjs`.
-  - mutation(계획 대비): `@stryker-mutator/vitest-runner` 10.0.0은 vitest 5와 dry run은 되지만 변이마다 실행 테스트 0건으로 보고해 전부 "survived"가 된다. **command runner**로 docker 불필요 계층(`vitest.mutation.config.ts`: unit·property·contract·fault/mini-redis)을 변이마다 통째로 돌린다(`--bail 1`). 671개 변이, 로컬 약 15분(동시성 4).
-- 결정론: 패키지 시간 읽기는 내부 `clock.now()`로 모음(unit/property는 가짜 시계). 실제 시간이 필요한 곳은 sleep 대신 마감 있는 `waitFor` 폴링, TTL은 `PTTL` 범위 단언. 테스트마다 고유 네임스페이스 `t_<pid>_<seq>`, 전역 스캔 테스트는 워커별 논리 DB(`VITEST_POOL_ID % 16`) + 해당 DB만 FLUSHDB. 포트는 동적. 콘텐츠는 seed 생성기.
+- Coverage (v8, unit + property + integration + fault merged, `src/**`): lines 90 / branches 85 / functions 90, per file lines >= 80 - **report-only until 2.0.0, blocking from 2.0.0**.
+- `tsc --noEmit` (strict) + contract-types, `publint`, `attw --profile node16` (zero conditional-types errors), `check-pack` whitelist, `check-no-hangul`, `check-commit-messages` (P1), size budgets (ESM gzip per entry, initial measurement +20%), zero eslint errors, mutation >= 70% (blocking from 2.0.0).
+  - P0a values: attw ignored only the `false-esm` rule until P1 (conditional types) - **removed in P1** (conditional `{types, default}` per export condition, attw `--profile node16` passes without exceptions). size-limit uses `@size-limit/file` to measure the gzip size of the entry file + shared chunks (dist is not minified, so this is the shipped files gzipped, not "min+gz"). 1.0.6: `.` 4.12 kB -> budget 5 kB, `./use-cache` 3.14 kB -> 3.8 kB, `./instrumentation` 1.69 kB -> 2.1 kB, CJS total 7.5 kB -> 9 kB. Only `.size-limit.json`, no `size.mjs`.
+  - P1 reset (same +20% rule, 1.1.0 output): `.` 5.47 kB -> 6.6 kB, `./use-cache` 4.5 kB -> 5.4 kB, `./instrumentation` 1.71 kB -> 2.1 kB (unchanged), CJS 8.99 kB -> 10.8 kB.
+  - In P0a/P0b CI collected coverage for unit + property only; merging integration and fault came with P0e (reporting).
+- Flakiness: no retries (`retry:0`, Playwright `retries:0`). Unstable tests get the `@quarantine` tag (excluded from the gate) + a tracking issue + fixed or deleted within 7 days, nightly `--repeat-each=20`.
+  - Implementation (P0e): vitest `itQuarantine("#<issue> until YYYY-MM-DD", name, fn)` (`tests/support/quarantine.ts`) - skipped normally, only those with `repeats: 20` when `NRC_QUARANTINE=only`. Playwright: `@quarantine(#<issue> until YYYY-MM-DD)` in the title, the config uses `grepInvert` normally and `grep` with `NRC_QUARANTINE=only`. `scripts/check-quarantine.mjs` (CI static) fails on a bad issue/deadline format, an expired deadline, or more than 7 days (negative test: injecting an expired deadline or a bad format exits 1). The nightly `quarantine` job repeats x20.
+- Reporting: vitest JUnit, JSON, coverage (lcov/html), Playwright html + trace + JUnit, perf JSON -> artifacts, summaries in `$GITHUB_STEP_SUMMARY`. No external services.
+  - Implementation (P0e): `scripts/junit-summary.mjs` tabulates JUnit (vitest `reports/junit.xml`, Playwright `reports/e2e-junit.xml`). For coverage the unit (Node 22), integration and fault jobs write blob reports (with coverage) via `NRC_BLOB=<name>`, and the ci `coverage` job merges them with `vitest --merge-reports` and summarizes with `coverage-summary.mjs` (report-only, outside the gate). perf: `reports/perf.json` + summary, mutation: `scripts/mutation-summary.mjs`.
+  - mutation (vs. plan): `@stryker-mutator/vitest-runner` 10.0.0 dry-runs with vitest 5 but reports zero tests per mutant, so everything "survives". The **command runner** runs the Docker-free layers (`vitest.mutation.config.ts`: unit, property, contract, fault/mini-redis) whole per mutant (`--bail 1`). 671 mutants, ~15 min locally (concurrency 4).
+- Determinism: package time reads go through an internal `clock.now()` (fake clock in unit/property). Where real time is needed: deadline-bound `waitFor` polling instead of sleeps, TTLs asserted as `PTTL` ranges. A unique namespace `t_<pid>_<seq>` per test; tests that scan globally use a logical DB per worker (`VITEST_POOL_ID % 16`) and FLUSHDB only that DB. Dynamic ports. Content from a seeded generator.
 
-### 6.7 로컬 DX
+### 6.7 Local DX
 
-사전 요구: Node 22 LTS(`.nvmrc`), npm 10+, Docker Desktop(WSL2, compose v2), 여유 메모리 8GB, `npx playwright install chromium`(P0c~).
+Requirements: Node 22 LTS (`.nvmrc`), npm 10+, Docker Desktop (WSL2, compose v2), 8 GB free memory, `npx playwright install chromium` (P0c~).
 
-| 스크립트 | 내용 |
+| Script | Content |
 |---|---|
-| `test` | unit + property + contract-oracle (docker 불필요; oracle은 P0c~) |
-| `test:unit` / `test:prop` / `test:int` / `test:fault` / `test:contract` | 계층별. `test:fault` = fault + fault-docker, `test:fault:nodocker` = mini-redis 부분만 |
-| `check-no-hangul` / `check-pack` | 개별 게이트 |
-| `test:e2e` / `test:chaos` / `test:perf` / `test:mutation` | Playwright(빌드 필요) / vitest chaos(빌드+infra 필요) / `perf.mjs --check` / Stryker |
-| `test:contract` = `test:contract:oracle`(vitest contract) + `test:contract:types`(`contract-types.mjs --variant all`) | P0c~P0d |
-| `test:all` | infra:up → 전 계층 → infra:down |
-| `infra:up` / `infra:down` / `infra:logs` / `infra:ps` / `infra:cli` | compose 관리 |
-| `pack:local` / `apps:prepare` / `fleet` / `origin` | tarball 생성 / 앱 조립·빌드 / 수동 fleet(기본 LB 3000, origin 4010) / origin 단독 |
+| `test` | unit + property + contract-oracle (no Docker; oracle since P0c) |
+| `test:unit` / `test:prop` / `test:int` / `test:fault` / `test:contract` | per layer. `test:fault` = fault + fault-docker, `test:fault:nodocker` = mini-redis part only |
+| `check-no-hangul` / `check-pack` | individual gates |
+| `test:e2e` / `test:chaos` / `test:perf` / `test:mutation` | Playwright (needs builds) / vitest chaos (needs builds + infra) / `perf.mjs --check` / Stryker |
+| `test:contract` = `test:contract:oracle` (vitest contract) + `test:contract:types` (`contract-types.mjs --variant all`) | P0c..P0d |
+| `test:all` | infra:up -> every layer -> infra:down |
+| `infra:up` / `infra:down` / `infra:logs` / `infra:ps` / `infra:cli` | compose management |
+| `pack:local` / `apps:prepare` / `fleet` / `origin` | build the tarball / assemble and build apps / manual fleet (LB 3000, origin 4010 by default) / origin alone |
+| `quality` | publint + attw + size-limit + check-pack + check-no-hangul (runs all, fails if any failed) |
 
-로컬 e2e 한 바퀴: `npm run infra:up -- redis84 toxiproxy` → `node scripts/prepare-app.mjs all --build A`(패키지 1.0.6 기준선이면 `--pkg npm:1.0.6`) → `npm run test:e2e`. chaos는 여기에 `node scripts/prepare-app.mjs static-site --build A,B` 후 `npm run test:chaos`.
-| `quality` | publint + attw + size-limit + check-pack + check-no-hangul (전부 실행 후 하나라도 실패면 실패) |
+One local e2e round: `npm run infra:up -- redis84 toxiproxy` -> `node scripts/prepare-app.mjs all --build A` (`--pkg npm:1.0.6` for the 1.0.6 baseline) -> `npm run test:e2e`. For chaos additionally `node scripts/prepare-app.mjs static-site --build A,B`, then `npm run test:chaos`.
 
 ### 6.8 CI
 
-`ci.yml`(pull_request, push, workflow_call `level: pr|full`):
+`ci.yml` (pull_request, push, workflow_call `level: pr|full`):
 
 ```
-setup(매트릭스 계산, pack → tgz artifact)          [P0c~]
- ├─ static: check-no-hangul · lint · typecheck · build · quality
- ├─ unit: Node [22,24]   (Node 20은 2026-04-30 EOL이고 vitest 5·size-limit 14가 ^22.12 요구 → 제외)
- ├─ unit-windows: windows-latest Node 22 (docker 불필요 계층: unit·property·fault(mini-redis)·check-pack)
- ├─ integration: Node 22 × Redis [7.2, 8.4]          [P0b~]
- ├─ fault: Node 22 (infra:up redis84+toxiproxy → mini-redis + toxiproxy → infra:down)   [P0b~]
- ├─ contract: Next [16.1, 16.3] (+full: canary)      [P0c~]
- ├─ e2e: pr = 16.3×8.4×3앱 / full = [16.1,16.3]×[7.2,8.4]×3앱 (+canary)   [P0c~]
- └─ gate: 필수 job 전부 성공 (브랜치 보호 required check는 이것 하나)
+setup (matrix, pack -> tgz artifact)                    [P0c~]
+ |- static: check-no-hangul, check-commit-messages, lint, typecheck, build, quality
+ |- unit: Node [22,24]   (Node 20 reached EOL on 2026-04-30 and vitest 5 / size-limit 14 require ^22.12 -> excluded)
+ |- unit-windows: windows-latest Node 22 (Docker-free layers: unit, property, fault (mini-redis), check-pack)
+ |- integration: Node 22 x Redis [7.2, 8.4] (+ Redis 8.4 x @redis/client 6)   [P0b~, P1]
+ |- fault: Node 22 (infra:up redis84+toxiproxy -> mini-redis + toxiproxy -> infra:down)   [P0b~]
+ |- contract: Next [16.1, 16.3] (+full: canary)       [P0c~]
+ |- e2e: pr = 16.3 x 8.4 x 3 apps / full = [16.1,16.3] x [7.2,8.4] x 3 apps (+canary)   [P0c~]
+ `- gate: every required job succeeded (the only required check for branch protection)
 ```
 
-- `nightly.yml`(cron): ci full + chaos + perf + quarantine 반복 + Node 24 e2e, 실패 시 이슈 자동 생성. weekly: mutation + canary 전체.
-- `release.yml`: `jobs.gate: uses: ./.github/workflows/ci.yml with level: full` + chaos 필수 부분집합(C1,C3,C7,C11) → `release`(needs 전부)가 changesets+OIDC 게시. 게이트 미통과 커밋은 게시 불가.
-- 캐싱: setup-node npm 캐시(`package-lock.json`, `test-apps/_variants/*/package-lock.json`), Next 빌드 캐시(`.work/*/.next/cache`), Playwright 브라우저. Next 빌드는 `app×Next` 6벌만 하고 Redis 셀들이 artifact 재사용.
-- 예산: PR ≤15분, full/nightly ≤60분, weekly mutation ≤90분.
-- 보안: Action SHA 고정, 기본 `permissions: contents: read`, release job만 `id-token: write`·`contents`·`pull-requests: write`.
-- **trusted publishing(OIDC) 전환**: ① (사용자, npmjs.com) 패키지 Settings → Trusted Publisher → GitHub Actions, owner `mirunamu00`, repo `next-redis-cache`, workflow `release.yml`(environment 선택) ② 워크플로 Node 24 또는 npm ≥11.5.1, `id-token: write`, `NODE_AUTH_TOKEN` 제거 ③ 1.1.0 실게시로 검증 ④ (사용자) "Require 2FA and disallow tokens", `NPM_TOKEN` 시크릿·토큰 폐기. 리스크(추측): changesets/action의 `.npmrc` 처리와 `setup-node registry-url`의 빈 토큰이 OIDC와 충돌하는지 — 첫 게시는 프리릴리스로 시험.
-  - **P1 조사 결과(확정)** — 11절에 명령 전문.
-    - ①은 CLI로도 된다: `npm trust github`(npm **≥11.15.0**; 12.x는 Node ^22.22.2 요구라 로컬 Node 22.21에서는 `npx npm@11.20.0`). 계정 2FA 필수, **2FA 우회 granular 토큰·아이디/비번 인증으로는 불가**(대화형 로그인 + OTP 필요). 패키지당 설정 1개(바꾸려면 `npm trust list` → `revoke` → 재생성). `--dry-run` 출력 확인: `{package, file: release.yml, repository: mirunamu00/next-redis-cache, permissions: [createPackage]}`.
-    - ②의 리스크는 해소: changesets/action **v1.7.0+**는 `NPM_TOKEN` env가 없고 OIDC env(`ACTIONS_ID_TOKEN_REQUEST_*`)가 있으면 `.npmrc`를 만들지 않고 신뢰 게시 경로를 탄다(v1.9.0 소스 확인). setup-node에는 `registry-url`을 주지 않는다(주면 `NODE_AUTH_TOKEN` 자리표시 `.npmrc`가 생김). `changeset publish`는 CI에서 OTP·`npm profile` 검사를 건너뛰고 `npm publish <dir> --json --access public --tag latest`를 부른다. changesets/action **v2는 Changesets CLI v3 전용**이라 v1.9.0에 고정.
-    - provenance: 신뢰 게시는 자동 생성, `NPM_CONFIG_PROVENANCE=true`로 명시. 검증 조건인 `package.json repository.url`을 P1에서 추가했다(없으면 E422).
-    - ③ 1.1.0 실게시는 아직(이 브랜치는 master 아님). NPM_TOKEN 시크릿은 만료 추정, 여기서 갱신 불가(gh·GitHub 토큰 없음) → 11절 대안 절차.
-- 프리릴리스: `next` 브랜치에서 `changeset pre enter next` → `2.0.0-next.N`(dist-tag `next`), 안정화 전 `pre exit`.
-- **P0c~P0e 구현(확정, 계획 대비 차이 포함)**
-  - 트리거: `push`에 `feat/**` 추가(PR 없이 기능 브랜치 검증, gh CLI 없음). `pull_request`·`master`·`next`는 그대로.
-  - ci.yml job: static(+check-quarantine) · unit[22,24] · unit-windows · integration[7.2,8.4] · fault · setup(build+pack → `package-tarball` artifact) · contract[16.1,16.3(+canary, full, continue-on-error)] · e2e[app × 16.3 × 8.4 / full: app × [16.1,16.3] × [7.2,8.4]] · perf(결정론 게이트, full이면 `--time`) · coverage(병합, gate 밖) · gate.
-  - e2e 셀마다 자기 앱을 빌드한다(계획은 `app×Next` 6벌 빌드 후 Redis 셀이 artifact 재사용). 빌드가 30~40초라 수백 MB standalone(static-site 145MB)을 artifact로 옮기는 것보다 싸다.
-  - Playwright 브라우저 설치 없음(서버 액션도 폼 제출로 검증). 브라우저가 필요한 테스트가 생기면 그 job에 `npx playwright install --with-deps chromium` 추가.
-  - `chaos.yml`: 재사용 워크플로(`workflow_call`·`workflow_dispatch`, 입력 `files`·`variant`). 앱 빌드(static-site A·B, full-legacy A, full-cc A) 후 `vitest --project chaos`.
-  - `nightly.yml`: 매일 03:17 KST — ci level=full + chaos 전체 + quarantine x20 + e2e Node 24(3앱). 매주 월 04:41 KST — + mutation + canary e2e(단일 job, 테스트 단계 `continue-on-error` 후 outcome을 report가 읽음). schedule 실행 실패(또는 canary 실패) 시 `scripts/nightly-issue.mjs`가 `nightly-failure` 라벨 이슈를 열거나 댓글을 단다. **schedule은 기본 브랜치에서만 돌므로**, `feat/**`에 nightly.yml·chaos.yml을 바꾸는 push가 있으면 주간 job까지 전부 1회 돈다(이슈는 안 연다).
-  - `release.yml`: `gate`(ci.yml level=full) + `chaos`(필수 부분집합: `startup.test.ts` C1·C9, `rolling.test.ts` C11·C12) → `release`가 `needs: [gate, chaos]`. 계획의 C3(무응답)·C7(축출)은 해당 시나리오가 생기는 단계(P3·P6)에서 부분집합에 추가. 게시 방식(NPM_TOKEN, 태그 참조 액션, Node 20)은 P1에서 OIDC·SHA 고정·Node 24로 바꿨다(release job: checkout v7.0.1·setup-node v7.0.0·changesets/action v1.9.0 SHA 고정, Node 24 + `npm@11.20.0`, 토큰 없음, `id-token: write`는 release job만, 포크에서는 미실행).
-  - P1: ci.yml integration 매트릭스에 `@redis/client 6` 셀(Redis 8.4, `npm i --no-save @redis/client@6` 후 typecheck + integration 전체). 셀 이름 `integration (Redis x, @redis/client lock|6)`, blob·artifact 이름에 client 포함(병합 커버리지 충돌 방지). fault·oracle은 6 셀에서 제외 — mini-redis는 RESP2 전용이고 6은 `HELLO 3`으로 시작한다.
-  - 워크플로 정적 검사: `docker run --rm -v <repo>:/repo -w /repo rhysd/actionlint`(로컬, 설치 불필요). 기존 gate의 `node -e` 따옴표 info 1건 외 지적 없음.
+- `nightly.yml` (cron): ci full + chaos + perf + quarantine repeats + e2e on Node 24, opens an issue on failure. weekly: mutation + all of canary.
+- `release.yml`: `jobs.gate: uses: ./.github/workflows/ci.yml with level: full` + the required chaos subset -> `release` (needs all) publishes with changesets + OIDC. A commit that fails the gate cannot publish.
+- Caching: setup-node npm cache (`package-lock.json`, `test-apps/_variants/*/package-lock.json`), Next build cache (`.work/*/.next/cache`), Playwright browsers. Planned: build only `app x Next` (6) and let Redis cells reuse artifacts (see D7 for what was done).
+- Budgets: PR <= 15 min, full/nightly <= 60 min, weekly mutation <= 90 min.
+- Security: actions pinned to SHAs, default `permissions: contents: read`, only the release job has `id-token: write`, `contents` and `pull-requests: write`.
+- **Trusted publishing (OIDC)**: (1) (user, npmjs.com) package Settings -> Trusted Publisher -> GitHub Actions, owner `mirunamu00`, repo `next-redis-cache`, workflow `release.yml` (environment optional) (2) workflow on Node 24 or npm >= 11.5.1, `id-token: write`, no `NODE_AUTH_TOKEN` (3) verified by actually publishing 1.1.0 (4) (user) "Require 2FA and disallow tokens", revoke the `NPM_TOKEN` secret and token. Risk (guess): whether changesets/action's `.npmrc` handling and the empty token from `setup-node registry-url` conflict with OIDC - try the first publish as a prerelease.
+  - **P1 findings (final)** - full commands in section 11.
+    - (1) also works from the CLI: `npm trust github` (npm **>= 11.15.0**; 12.x requires Node ^22.22.2, so on the local Node 22.21 use `npx npm@11.20.0`). The account needs 2FA; **granular tokens that bypass 2FA and username/password auth are rejected** (interactive login + OTP). One configuration per package (to change it: `npm trust list` -> `revoke` -> create again). `--dry-run` output checked: `{package, file: release.yml, repository: mirunamu00/next-redis-cache, permissions: [createPackage]}`.
+    - The risk in (2) is resolved: changesets/action **v1.7.0+** writes no `.npmrc` and takes the trusted-publishing path when the `NPM_TOKEN` env is unset and the OIDC env (`ACTIONS_ID_TOKEN_REQUEST_*`) is present (checked in the v1.9.0 source). setup-node gets no `registry-url` (it would write an `.npmrc` with a `NODE_AUTH_TOKEN` placeholder). In CI `changeset publish` skips the OTP and `npm profile` checks and runs `npm publish <dir> --json --access public --tag latest`. changesets/action **v2 requires Changesets CLI v3**, so the workflow is pinned to v1.9.0.
+    - Provenance: generated automatically with trusted publishing, made explicit with `NPM_CONFIG_PROVENANCE=true`. P1 added `package.json` `repository.url`, which provenance verification requires (E422 without it).
+    - (3) 1.1.0 is not published yet (this branch is not master). The `NPM_TOKEN` secret is probably expired and cannot be updated from here (no gh, no GitHub token) -> fallback in section 11.
+- Prereleases: `changeset pre enter next` on the `next` branch -> `2.0.0-next.N` (dist-tag `next`), `pre exit` before stable.
+- **P0c..P1 implementation (final, including differences from the plan)**
+  - Triggers: `push` also on `feat/**` (validate feature branches without PRs; no gh CLI). `pull_request`, `master` and `next` unchanged.
+  - ci.yml jobs: static (+check-quarantine, +check-commit-messages since P1) · unit [22,24] · unit-windows · integration [7.2, 8.4] (+ client 6) · fault · setup (build + pack -> `package-tarball` artifact) · contract [16.1, 16.3 (+canary on full, continue-on-error)] · e2e [app x 16.3 x 8.4 / full: app x [16.1,16.3] x [7.2,8.4]] · perf (deterministic gate, `--time` on full) · coverage (merged, outside the gate) · gate.
+  - Each e2e cell builds its own app (plan: build `app x Next` 6 times and reuse artifacts per Redis cell). A build takes 30..40 s, cheaper than moving hundreds of MB of standalone output (static-site 145 MB) through artifacts.
+  - No Playwright browser install (server actions are verified by form submission). Add `npx playwright install --with-deps chromium` to a job once a test needs a browser.
+  - `chaos.yml`: reusable workflow (`workflow_call`, `workflow_dispatch`, inputs `files` and `variant`). Builds the apps (static-site A and B, full-legacy A, full-cc A), then `vitest --project chaos`.
+  - `nightly.yml`: daily 03:17 KST - ci level=full + all chaos + quarantine x20 + e2e on Node 24 (3 apps). Weekly Monday 04:41 KST - + mutation + canary e2e (single job, test step `continue-on-error`, the report reads the outcome). A failed scheduled run (or a failed canary) makes `scripts/nightly-issue.mjs` open or comment on an issue labelled `nightly-failure`. **Schedules only run on the default branch**, so a `feat/**` push that changes nightly.yml or chaos.yml runs everything once, weekly jobs included (no issue is filed).
+  - `release.yml`: `gate` (ci.yml level=full) + `chaos` (required subset: `startup.test.ts` C1, C9 and `rolling.test.ts` C11, C12) -> `release` with `needs: [gate, chaos]`. The planned C3 (unresponsive) and C7 (eviction) join the subset in the phase that adds them (P3, P6). The publishing setup (NPM_TOKEN, tag-referenced actions, Node 20) was replaced in P1 by OIDC, SHA pinning and Node 24 (release job: checkout v7.0.1, setup-node v7.0.0, changesets/action v1.9.0 pinned to SHAs, Node 24 + `npm@11.20.0`, no token, `id-token: write` only in the release job, skipped on forks).
+  - P1: an `@redis/client 6` cell in the ci.yml integration matrix (Redis 8.4, `npm i --no-save @redis/client@6`, then typecheck + the whole integration layer). Cell name `integration (Redis x, @redis/client lock|6)`, the client is part of the blob and artifact names (no collisions in the merged coverage). fault and oracle are not run in the 6 cell - mini-redis speaks RESP2 only and 6 opens with `HELLO 3`.
+  - P1: `scripts/check-commit-messages.mjs` in the static job (checkout with `fetch-depth: 0`): every commit in `origin/master..HEAD` (falling back to the pushed range, then HEAD) must be free of Hangul.
+  - Static workflow check: `docker run --rm -v <repo>:/repo -w /repo rhysd/actionlint` (local, nothing to install). Only one info finding (quoting in the gate's `node -e`).
 
-### 6.9 회귀 매핑 (1.0.6에서 먼저 실패)
+### 6.9 Regression mapping (fails on 1.0.6 first)
 
-| ID | 계층 | 앱·도구 | 시나리오 |
+| ID | Layer | App / tool | Scenario |
 |---|---|---|---|
-| 7-1 | integration + oracle + e2e | full-cc, full-legacy | `updateTags([t],{expire:31536000})` 후 set→get 히트 기대 / oracle 불일치 / 액션 `revalidateTag(t,'max')` 후 3번째 요청 히트·origin +1 (A7), 레거시 `/pinned` 동일 |
-| 7-2 | fault + chaos C1·C9 | static-site | 닫힌 포트·connect 대기에서 `get()` 1.5s 내 null, hook throw 시 reject 없음 / Redis 없이 fleet 기동 2s 내 sitemap 200 (A2) |
-| 7-3 | fault(mini-redis) + chaos C2·C5 | full-cc | `reconnectStrategy:false` 끊긴 뒤 get 100회 → unhandled 0 / 재연결 중 100회 → 복구 후 밀린 GET 0 (A4) |
-| 7-4 | integration + e2e | static-site | prewarm 후 `segmentData` 키 = meta `segmentPaths`, `/index`·og APP_ROUTE 키 존재, not-found status 보존 / 세그먼트 prefetch 200 (A6) |
-| 7-5 | integration + perf | static-site | `EX 1` 1000개 → 2s 후 DBSIZE 기준선 / 배포 10회 키 상한 (A5) |
-| 7-6 | e2e + chaos C6·C13 | full-legacy `/pinned`·`/race` | revalidatePath 직후 200+옛 본문→새 본문, FLUSHALL 후 200, 렌더 중 무효화에도 옛 데이터 부활 없음 (I5) |
-| 7-7 | unit + fault | — | set 중 hang → `logger.warn` 1회, 연속 실패는 전이 시에만 |
-| 7-8 | contract-types | — | peer 범위 + 16.x 계약만 검증(Next 15 제외 확정) |
-| 7-9 | integration + chaos C11·C12 | static-site A/B | 1만 키 UNLINK 배치 ≤500, 롤링 중 최근 접근 옛 빌드 보류+TTL 상한, 연결 전이면 ready 뒤 실행, docs `build-keys.test.mjs` 포팅 |
-| 7-10 | unit | — | 명령 성공 후 `vi.getTimerCount()===0` |
-| 7-11 | unit + integration | full-legacy 라우트 핸들러 | APP_ROUTE revalidate=5 → PTTL≈7.5s, 정적 → staticSeconds, 오래된 lastModified 재시드 즉시 만료 없음 |
-| 7-12 | integration + property | — | NX set 시 기존 메타 불변, 같은 키 set 중첩 시 get이 두 번째 대기 |
-| 7-13 | static | — | README 코드 블록 추출 → contract-types 컴파일 |
+| 7-1 | integration + oracle + e2e | full-cc, full-legacy | set -> get hit after `updateTags([t],{expire:31536000})` / oracle mismatch / after an action `revalidateTag(t,'max')` the 3rd request hits, origin +1 (A7), same for legacy `/pinned` |
+| 7-2 | fault + chaos C1, C9 | static-site | `get()` null within 1.5 s on a closed port / waiting connect, no reject when the hook throws / fleet starts without Redis, sitemap 200 within 2 s (A2) |
+| 7-3 | fault (mini-redis) + chaos C2, C5 | full-cc | 100 gets after a `reconnectStrategy:false` disconnect -> zero unhandled / 100 gets while reconnecting -> zero queued GETs after recovery (A4) |
+| 7-4 | integration + e2e | static-site | after prewarm `segmentData` keys = meta `segmentPaths`, `/index` and og APP_ROUTE keys exist, not-found status kept / segment prefetch 200 (A6) |
+| 7-5 | integration + perf | static-site | 1000 x `EX 1` -> DBSIZE back to baseline after 2 s / key bound after 10 deployments (A5) |
+| 7-6 | e2e + chaos C6, C13 | full-legacy `/pinned`, `/race` | right after revalidatePath 200 + old body -> new body, 200 after FLUSHALL, no old data coming back after an invalidation during a render (I5) |
+| 7-7 | unit + fault | - | hang during set -> one `logger.warn`, repeated failures only on transitions |
+| 7-8 | contract-types | - | peer range + 16.x contract only (Next 15 excluded) |
+| 7-9 | integration + chaos C11, C12 | static-site A/B | 10k keys, UNLINK batches <= 500, recently used old builds held during rolling + TTL cap, runs after ready when not connected yet, port of docs `build-keys.test.mjs` |
+| 7-10 | unit | - | `vi.getTimerCount()===0` after a successful command |
+| 7-11 | unit + integration | full-legacy route handler | APP_ROUTE revalidate=5 -> PTTL ~7.5 s, static -> staticSeconds, no immediate expiry when re-seeding an old lastModified |
+| 7-12 | integration + property | - | NX set leaves existing metadata unchanged, get waits for the second of overlapping sets of one key |
+| 7-13 | static | - | extract README code blocks -> compile with contract-types |
 
-docs에서 이관된 검증: `prod-cache.spec.ts`(Redis 없이 200) → static-site e2e+C1 / `resilient-cache-handler.test.mjs` → fault+C3·C6 / `redis-connect.test.mjs` → fault / `build-keys.test.mjs` → integration+C11·C12 / `no-redis.test.mjs` → unit+static-site e2e.
+Checks migrated from docs: `prod-cache.spec.ts` (200 without Redis) -> static-site e2e + C1 / `resilient-cache-handler.test.mjs` -> fault + C3, C6 / `redis-connect.test.mjs` -> fault / `build-keys.test.mjs` -> integration + C11, C12 / `no-redis.test.mjs` -> unit + static-site e2e.
 
-**P0d 재현 현황(1.0.6, 전부 기대 실패로 등록)** — 증거는 `NRC_REPRO=show`로 돌린 실제 실패 메시지.
+**P0d reproduction status (1.0.6, all registered as expected failures)** - evidence = the actual failure messages with `NRC_REPRO=show`.
 
-| ID | 재현 테스트(파일) | 1.0.6 실패 내용 |
+| ID | Reproductions (files) | 1.0.6 failure |
 |---|---|---|
-| 7-1 | integration `repro.test.ts` 3건, oracle(durations), e2e full-cc·full-legacy 각 1건 | `updateTags(t,{expire:1y})` 뒤 쓴 항목 get → `undefined`, `getExpiration` = now+1년, 레거시 항목도 `null` / oracle 반례: 기준 `k0=hit:v1`, 우리 `k0=miss` / full-cc 'max' 후 origin 재호출 5회(기대 1) / 레거시 pinned 'max' 후 계속 404 |
-| 7-2 | fault `repro-connection.test.ts` 3건, chaos C1 2건·C9 1건 | 닫힌 포트에서 get 1.5s 내 미결(`settled:false`), hook throw가 reject로 전파, `cleanupOldBuildKeys` 3s 내 미결 / prewarm on 인스턴스 10s 내 준비 안 됨, 첫 페이지 5s 타임아웃(Redis 부재·잘못된 비밀번호) |
-| 7-3 | fault 2건, chaos C2 2건·C5 1건 | 닫힌 클라이언트에서 get 100회 → unhandledRejection 100건("The client is closed"), 재연결 중 get 100회 → 복구 후 GET 100건 재전송 / 트래픽 중 3초 장애 → unhandledRejection 171건(C2)·165건(C5), 복구 후 밀린 GET 3~22건 |
-| 7-4 | integration 4건, e2e static-site 1건 | 세그먼트 키 `['_full','_tree','about/__PAGE__']`(기대 `/` 시작), `/index` 없음, `/icon`(APP_ROUTE) 없음, `/_not-found` 미프리워밍 / 프리워밍된 `/about` `/_tree` prefetch 404 |
-| 7-5 | integration 2건 | 만료 후 `_tags` HLEN 50(기대 0), 깨진 필드 하나로 revalidateTag 전체 중단 → 항목 계속 서빙 |
-| 7-6 | integration 2건, e2e full-legacy 1건, chaos C6·C13 | `revalidateTag(t,{expire})` 후 get `null`, 명시 태그 무효화 전 렌더 결과가 fresh로 부활 / revalidatePath 후 404만 관측 / 네임스페이스 삭제 후 docs 404 / 느린 렌더 중 무효화 뒤 `HIT` + 옛 버전 |
-| 7-7 | fault 1건 | Redis hang 중 set 실패에 console.warn/error 0회 |
-| 7-8 | unit 1건, contract-types `@ts-expect-error` 2건 | peer 최저 메이저 15, 레거시 클래스가 Next `CacheHandlerContext`로 생성 불가(자체 context 타입의 index signature) |
-| 7-9 | integration 2건, chaos C11·C12 | 1만 키를 DEL 1회로 삭제(기대 ≥20회), 방금 읽힌 옛 빌드 키 삭제 / 롤링·롤백 중 옛 인스턴스 docs 404 |
-| 7-10 | unit 1건 | 성공 후 타이머 1개 잔존 |
-| 7-11 | unit 3건, integration 1건 | APP_ROUTE revalidate 5 → EX 47,304,000(1.5년), 정적 1.5년 > 30일, 이틀 전 lastModified 재시드 안 됨 / PTTL 47,304,000,000ms |
-| 7-12 | integration 3건 | NX 스킵인데 태그 `['b']`로 덮어씀, 다른 Pod가 쓴 값을 고아로 삭제, 겹친 set에서 get이 `first` 반환 |
-| 7-13 | unit 4건 | 기본 use-cache 키가 `uc:app:b1:…`(keyPrefix 밖), README `cacheLife("hours")` 주석 stale 3600(실제 300), Security 절 없음, "모든 Redis 호출 타임아웃" 주장 |
-| A2 | e2e static-site 1건 | 빈 Redis(프리워밍 없음)에서 `dynamicParams=false` docs 404 |
+| 7-1 | integration `repro.test.ts` 3, oracle (durations), e2e full-cc and full-legacy 1 each | get of an entry written after `updateTags(t,{expire:1y})` -> `undefined`, `getExpiration` = now + 1 year, legacy entry `null` too / oracle counterexample: reference `k0=hit:v1`, ours `k0=miss` / full-cc: 5 origin calls after 'max' (expected 1) / legacy pinned keeps 404 after 'max' |
+| 7-2 | fault `repro-connection.test.ts` 3, chaos C1 2, C9 1 | get unsettled within 1.5 s on a closed port (`settled:false`), a throwing hook propagates as a reject, `cleanupOldBuildKeys` unsettled within 3 s / an instance with prewarm on is not ready within 10 s, first page times out after 5 s (no Redis, wrong password) |
+| 7-3 | fault 2, chaos C2 2, C5 1 | 100 gets on a closed client -> 100 unhandledRejections ("The client is closed"), 100 gets while reconnecting -> 100 GETs replayed after recovery / 3 s outage under traffic -> 171 (C2) and 165 (C5) unhandledRejections, 3..22 queued GETs after recovery |
+| 7-4 | integration 4, e2e static-site 1 | segment keys `['_full','_tree','about/__PAGE__']` (expected leading `/`), no `/index`, no `/icon` (APP_ROUTE), `/_not-found` not prewarmed / `/_tree` prefetch of the prewarmed `/about` 404 |
+| 7-5 | integration 2 | `_tags` HLEN 50 after expiry (expected 0), one broken field aborts the whole revalidateTag -> the entry keeps being served |
+| 7-6 | integration 2, e2e full-legacy 1, chaos C6, C13 | get `null` after `revalidateTag(t,{expire})`, a render from before an explicit-tag invalidation comes back as fresh / only 404 observed after revalidatePath / docs 404 after the namespace is deleted / `HIT` + old version after an invalidation during a slow render |
+| 7-7 | fault 1 | zero console.warn/error for a failed set while Redis hangs |
+| 7-8 | unit 1, contract-types `@ts-expect-error` 2 | lowest peer major 15, the legacy class cannot be constructed with Next's `CacheHandlerContext` (index signature of its own context type) |
+| 7-9 | integration 2, chaos C11, C12 | 10k keys deleted with one DEL (expected >= 20 calls), a just-read old build key deleted / old instances 404 docs during rolling and rollback |
+| 7-10 | unit 1 | one timer left after success |
+| 7-11 | unit 3, integration 1 | APP_ROUTE revalidate 5 -> EX 47,304,000 (1.5 years), static 1.5 years > 30 days, re-seeding a lastModified from two days ago stores nothing / PTTL 47,304,000,000 ms |
+| 7-12 | integration 3 | tags overwritten with `['b']` although NX skipped, a value written by another pod deleted as orphaned, get returns `first` with overlapping sets |
+| 7-13 | unit 4 | default use-cache key `uc:app:b1:...` (outside keyPrefix), README `cacheLife("hours")` comment stale 3600 (actually 300), no Security section, "every Redis call has a timeout" claim |
+| A2 | e2e static-site 1 | `dynamicParams=false` docs 404 on an empty Redis (no prewarm) |
 
-**P1(1.1.0) 전환 현황** — 수정 커밋마다 표식을 지웠다(`itRepro`→`it`, `repro()` 삭제). P1에서 새로 쓴 재현(7-1 치유·7-4 APP_ROUTE 메타·postponed·7-7 전이·7-9 패턴 중복)은 먼저 1.0.6에서 실패하는 것을 확인하고 커밋(262618f)했다.
+**P1 (1.1.0) conversion status** - each fixing commit removed its markers (`itRepro` -> `it`, `repro()` deleted). Reproductions written in P1 (7-1 heal, 7-4 APP_ROUTE meta and postponed, 7-7 transitions, 7-9 overlapping patterns) were first confirmed to fail on 1.0.6 and committed on their own (39182bd).
 
-| ID | 전환(일반 테스트가 됨) | 남은 재현(단계) |
+| ID | Converted (now regular tests) | Remaining reproductions (phase) |
 |---|---|---|
-| 7-1 | integration 4건×2버전(기록 후 쓴 항목 읽힘, getExpiration ≤ now, 레거시 공유 Hash, 1.0.x 미래 시각 치유), e2e full-cc 'max' 후 재생성 1회 | oracle(durations): Next는 옛 항목을 stale로 1회 제공(1.x는 미스)하고, Next 기본 `getExpiration`은 미래 `expired`를 돌려줘 soft 태그 항목을 버린다(1.x는 히트) — P2 `_tagstate` |
-| 7-2 | fault 1건(`cleanupOldBuildKeys` 3초 내 포기 — 7-9의 연결 타임아웃으로 해소) | fault 2건(README 1.0.x 배선의 무한 connect 대기, hook throw 전파), chaos C1 2건·C9 1건 — P2(`connectRedis`, hook 오류 격리). 1.1.0 README 배선(1초 상한 race)은 fault 테스트로 검증 |
-| 7-3 | fault 2건, chaos C2 2건·C5 1건 | — |
-| 7-4 | integration 6건×2버전, e2e static-site 세그먼트 prefetch 200(A6, `/` 추가) | — (A2 빈 Redis 404는 P3) |
-| 7-5 | — | integration 2건(P2) |
-| 7-6 | — | integration 2건, e2e full-legacy 2건(pinned 'max' 404를 7-1에서 7-6으로 재분류 — 미래 시각이 사라진 뒤 남은 원인이 레거시 삭제), chaos C6·C13 (P2) |
-| 7-7 | fault 1건, unit 2건(전이 기반: 장애 20회에 warn 1회, 복구 info 1회) | — |
-| 7-8 | — | unit 1건, contract-types 2건(P2: peer `next ^16.1`) |
-| 7-9 | integration 2건×2버전(500개 배치, 겹치는 패턴 1회 집계) | integration 1건(최근 접근 옛 빌드 보존), chaos C11·C12 — P4 레지스트리 정리 |
-| 7-10 | unit 1건 | — |
-| 7-11 | — | unit 3건, integration 1건(P2 TTL 정책) |
-| 7-12 | — | integration 3건(P2) |
-| 7-13 | unit 3건(README cacheLife·Security·타임아웃 주장) | unit 1건(기본 use-cache 키가 keyPrefix 밖 — 키 형식 변경이라 P2) |
+| 7-1 | integration 4 x 2 versions (entry written after the update is readable, getExpiration <= now, legacy via the shared hash, heal of a 1.0.x future time), e2e full-cc: one regeneration after 'max' | oracle (durations): Next serves an older entry stale once (1.x misses), and Next's default `getExpiration` returns the future `expired`, discarding soft-tagged entries (1.x hits) - P2 `_tagstate` |
+| 7-2 | fault 1 (`cleanupOldBuildKeys` gives up within 3 s - fixed by 7-9's connect timeout) | fault 2 (endless connect wait with the 1.0.x README wiring, a throwing hook propagates), chaos C1 2, C9 1 - P2 (`connectRedis`, isolating hook errors). The 1.1.0 README wiring (1 s bounded race) is verified by a fault test |
+| 7-3 | fault 2, chaos C2 2, C5 1 | - |
+| 7-4 | integration 6 x 2 versions, e2e static-site segment prefetch 200 (A6, `/` added) | - (A2, 404 on an empty Redis, is P3) |
+| 7-5 | - | integration 2 (P2) |
+| 7-6 | - | integration 2, e2e full-legacy 2 (the pinned 'max' 404 was moved from 7-1 to 7-6 - with the future time gone, the remaining cause is the legacy deletion), chaos C6, C13 (P2) |
+| 7-7 | fault 1, unit 2 (transition-based: one warn for 20 failures, one info on recovery) + unit tests of the reporter and of what the handlers report | - |
+| 7-8 | - | unit 1, contract-types 2 (P2: peer `next ^16.1`) |
+| 7-9 | integration 2 x 2 versions (batches of 500, overlapping patterns counted once) | integration 1 (keep a recently used old build), chaos C11, C12 - P4 registry cleanup |
+| 7-10 | unit 1 | - |
+| 7-11 | - | unit 3, integration 1 (P2 TTL policy) |
+| 7-12 | - | integration 3 (P2) |
+| 7-13 | unit 3 (README cacheLife, Security, timeout claim) | unit 1 (default use-cache key outside keyPrefix - a key format change, P2) |
 
-로컬 확인(P1 최종, Windows + Docker Desktop, Next 16.3.6, tarball 설치): typecheck·lint·build·quality 통과, `npm test` 52+기대 실패 6, fault 28+2, integration 44+22(Redis 7.2·8.4), e2e 3앱 18 통과(기대 실패 3: A2, 7-6 2건), chaos 6 통과 + 기대 실패 7(C1×2·C9·C6·C13·C11·C12), perf 기준선 1.1.0. `@redis/client 6.2.1`로 typecheck + integration 46건 통과.
+Local results (end of P1, Windows + Docker Desktop, Next 16.3.6, tarball install): typecheck, lint, build and quality pass; `npm test` 56 passed + 6 expected failures; fault (+docker) 28 + 2; integration 48 + 18 (Redis 7.2 and 8.4); e2e 3 apps 18 passed (3 expected failures: A2, two 7-6); chaos 6 passed + 7 expected failures (C1 x2, C9, C6, C13, C11, C12); perf baseline 1.1.0. With `@redis/client 6.2.1`: typecheck + all 46 integration tests pass.
 
-1.0.6에서 통과하는(=버그가 아닌) 대조군도 같이 둔다: 즉시 만료 `updateTags(tags)`는 oracle과 일치(히트·미스 각 10건 이상 발생 확인), 레거시 핸들러는 ready 검사를 먼저 해 재연결 중 명령을 쌓지 않음, updateTag 서버 액션은 즉시 반영, C2·C5에서 I1(전부 200)·I4(10s 내 히트 재개)는 유지.
+Controls that pass on 1.0.6 (= not bugs) are kept as well: immediate expiry `updateTags(tags)` agrees with the oracle (at least 10 hits and 10 misses observed), the legacy handler checks readiness first and queues nothing while reconnecting, the updateTag server action is applied immediately, C2 and C5 keep I1 (all 200) and I4 (hits resume within 10 s).
 
 ---
 
-## 7. 로드맵
+## 7. Roadmap
 
-| 단계 | 작업 | 완료 기준 | 의존 | 규모 |
+| Phase | Work | Done when | Depends on | Size |
 |---|---|---|---|---|
-| **P0a 골격·CI** | 디렉토리, tsconfig 분리, vitest projects, eslint, `.gitattributes`, `.nvmrc`, LICENSE, `check-pack`, `quality`(publint/attw/size), `ci.yml`(static/unit/unit-windows/gate) | 로컬 typecheck·build·lint·test·quality 통과. 게시물 화이트리스트 게이트 동작. 기존 src 동작 불변 | — | S~M |
-| **P0b 인프라** | compose(redis72/redis84/prodlike/toxiproxy/replica), testcontainers 헬퍼, mini-redis TS 포팅+자체 테스트, toxiproxy 클라이언트, `infra:*`, 네임스페이스·DB 격리, ci.yml integration/fault job | Windows Docker Desktop·Linux CI 양쪽 `infra:up` 성공, Redis 7.2/8.4 integration 스모크, toxic 4종을 테스트에서 제어 | P0a | M |
-| **P0c 테스트 앱·하네스** | 앱 3개, `_variants` 16.1/16.3/canary, `pack`, `prepare-app`(tgz·`npm:1.0.6`·`--hot-dist`), origin server, fleet(LB·롤링), 테스트 훅, `NRC_API` v1/v2 어댑터, contract·e2e job | 각 앱이 16.1·16.3에서 standalone 빌드, **1.0.6(v1 API)** 으로 fleet 2인스턴스 동작, `npm ls` 단일 Next, cacheComponents 제약 확인 | P0b | L |
-| **P0d 재현·기준선** | 6.9 매핑의 `it.fails`·e2e·chaos 실패 케이스, oracle 차분, perf 기준선(1.0.6 왕복 수·메모리) 커밋 | 전 항목 1.0.6에서 재현, 기준선 JSON 커밋, ci e2e(pr) 동작 | P0c | M |
-| **P0e nightly·리포팅** | `nightly.yml`, release 게이트 연결, artifact 리포트, flaky 정책, Stryker | nightly 1회 완주, release가 게이트 없이 게시 불가 | P0d | S |
-| P1 1.1.0 핫픽스 | 4절 목록 + LICENSE·exports types·Action SHA 고정·OIDC | 해당 `it.fails` 전환, static-site e2e 세그먼트 prefetch 200, OIDC+provenance 게시 | P0e | M — **게시 준비 완료**(OIDC 실게시만 남음, 11절) |
-| P2 v2 코어 | 팩토리 API, 키 스키마·엔벨로프, `_tagstate`, Next 16 의미론(레거시·use-cache SWR, `getExpiration=Infinity`), run 파이프라인(circuit·타임아웃), logger·onEvent, `connectRedis`, 빌드 페이즈 no-op, TTL 정책 → `2.0.0-next.0` | A1(7-1·2·3·5·6·7·10·11·12), A4, A7, A8 — oracle·fault·full-cc e2e로 판정 | P0 | L |
-| P3 폴백·프리워밍 | FileSystemCache 폴백, 재시드, 새 프리워밍, Next 매트릭스 계약 → `next.1` | A2, A3, A6 (static-site e2e, C1·C3·C6), 16.1·16.3 통과 | P2 | M |
-| P4 유지보수 | `cleanupOldBuilds`, `whenReady`, `startCacheMaintenance`, v1 레이아웃 호환, `_*` 예약, deprecated `cleanupOldBuildKeys` → `next.2` | A5 (C11·C12, integration) | P2 | S~M |
-| P5 docs 통합 | docs 설정 전환, 래퍼·`tests/unit/*` 삭제, docs는 기존 `test:e2e:prod` 유지 + 롤아웃 후 운영 스모크(sitemap 200, 로그, Redis 키·메모리) | A10, 운영 24h 무사고, 롤백 리허설 1회 | P3·P4·P1 | S |
-| P6 최적화 | 압축, `MEMORY USAGE` 측정, `tagStateCacheMs`, 파이프라이닝, HEXPIRE(≥7.4) 선택 → `next.3` | A9, 히트당 왕복 ≤2 | P2 | S~M |
-| P7 2.0.0 | README 재작성, MIGRATION.md, pre exit, docs `^2.0.0`, 커버리지·mutation 게이트 차단 전환 | 전 수용 기준 충족, 안정판 게시 | P5·P6 | S |
+| **P0a skeleton, CI** | layout, tsconfig split, vitest projects, eslint, `.gitattributes`, `.nvmrc`, LICENSE, `check-pack`, `quality` (publint/attw/size), `ci.yml` (static/unit/unit-windows/gate) | local typecheck, build, lint, test, quality pass. Publish whitelist gate works. Existing src behavior unchanged | - | S-M |
+| **P0b infrastructure** | compose (redis72/redis84/prodlike/toxiproxy/replica), testcontainers helper, mini-redis TS port + own tests, toxiproxy client, `infra:*`, namespace/DB isolation, ci.yml integration/fault jobs | `infra:up` works on Windows Docker Desktop and Linux CI, Redis 7.2/8.4 integration smoke, 4 toxics controlled from tests | P0a | M |
+| **P0c test apps, harness** | 3 apps, `_variants` 16.1/16.3/canary, `pack`, `prepare-app` (tgz, `npm:1.0.6`, `--hot-dist`), origin server, fleet (LB, rolling), test hooks, `NRC_API` v1/v2 adapters, contract and e2e jobs | every app builds standalone on 16.1 and 16.3, a 2-instance fleet runs with **1.0.6 (v1 API)**, `npm ls` single Next, cacheComponents constraint confirmed | P0b | L |
+| **P0d reproductions, baselines** | `it.fails`, e2e and chaos failures from the 6.9 mapping, oracle diff, perf baseline (1.0.6 round trips, memory) committed | every item reproduced on 1.0.6, baseline JSON committed, ci e2e (pr) works | P0c | M |
+| **P0e nightly, reporting** | `nightly.yml`, release gate, artifact reports, flakiness policy, Stryker | nightly completes once, release cannot publish without the gate | P0d | S |
+| **P1 1.1.0 hotfix** | section 4 list + LICENSE, exports types, SHA-pinned actions, OIDC | reproductions converted, static-site e2e segment prefetch 200, OIDC + provenance publish | P0e | M - **ready to publish** (only the OIDC publish itself remains, section 11) |
+| P2 v2 core | factory API, key schema and envelope, `_tagstate`, Next 16 semantics (legacy and use-cache SWR, `getExpiration=Infinity`), run pipeline (circuit, timeouts), logger and onEvent, `connectRedis`, build-phase no-op, TTL policy -> `2.0.0-next.0` | A1 (7-1, 2, 3, 5, 6, 7, 10, 11, 12), A4, A7, A8 - judged by oracle, fault, full-cc e2e | P0 | L |
+| P3 fallback, prewarm | FileSystemCache fallback, re-seed, new prewarm, Next matrix contract -> `next.1` | A2, A3, A6 (static-site e2e, C1, C3, C6), 16.1 and 16.3 pass | P2 | M |
+| P4 maintenance | `cleanupOldBuilds`, `whenReady`, `startCacheMaintenance`, v1 layout compatibility, reserved `_*`, deprecated `cleanupOldBuildKeys` -> `next.2` | A5 (C11, C12, integration) | P2 | S-M |
+| P5 docs integration | switch docs configuration, delete the wrapper and `tests/unit/*`, docs keeps `test:e2e:prod` + production smoke after rollout (sitemap 200, logs, Redis keys and memory) | A10, 24 h in production without incidents, one rollback rehearsal | P3, P4, P1 | S |
+| P6 optimization | compression, `MEMORY USAGE` measurement, `tagStateCacheMs`, pipelining, optional HEXPIRE (>= 7.4) -> `next.3` | A9, <= 2 round trips per hit | P2 | S-M |
+| P7 2.0.0 | README rewrite, MIGRATION.md, pre exit, docs `^2.0.0`, coverage and mutation gates become blocking | every acceptance criterion met, stable release | P5, P6 | S |
 
-클러스터 검증·롤백(P5): replicas 1이라 진짜 카나리 없음. ① 새 이미지를 로컬에서 `kubectl -n mirunamu port-forward svc/redis-master 6379`로 운영 Redis(8.4, 인증)에 붙이되 네임스페이스 `docs-canary`로 분리(비밀번호는 Secrets 레포에서 읽고 커밋 금지) ② 운영 배포 후 로그·Redis 메모리·키 수·sitemap 스모크 ③ 롤백은 helm-chart 자동 태그 커밋 revert → ArgoCD. 옛 빌드 키는 keepPrevious=1 + TTL 상한 1일로 남아 하루 내 롤백은 웜.
+Cluster verification and rollback (P5): replicas is 1, so there is no real canary. (1) Run the new image locally against production Redis (8.4, auth) through `kubectl -n mirunamu port-forward svc/redis-master 6379`, isolated in the namespace `docs-canary` (password read from the Secrets repo, never committed) (2) after deploying, smoke logs, Redis memory, key count, sitemap (3) roll back by reverting the helm-chart auto-tag commit -> ArgoCD. Old build keys stay with keepPrevious=1 + a 1-day TTL cap, so a rollback within a day is warm.
 
 ---
 
-## 8. 확정된 결정 (2026-09-29 사용자 승인)
+## 8. Decisions (approved by the user on 2026-09-29)
 
-| # | 결정 |
+| # | Decision |
 |---|---|
-| Q1 | 1.1.0 핫픽스를 먼저 내고 2.0으로 간다 |
-| Q2 | Next 15 지원 제외, peer `next ^16.1` |
-| Q3 | 디스크(빌드 산출물) 폴백 기본 on. Next 내부 경로 의존은 가드+매트릭스 계약 테스트 |
-| Q4 | 태그 상태는 네임스페이스 전역 |
-| Q5 | lazy 무효화만(역인덱스 폐지, eagerDelete 옵션 없음) |
-| Q6 | 압축 기본 none으로 시작, P6 측정 후 재결정 |
-| Q7 | 타임아웃 기본 read 1000ms / write 2000ms |
-| Q8 | 지원 Redis 최소 6.2, HEXPIRE는 7.4+에서 선택 |
-| Q9 | 프리워밍 패키지 기본 off, docs도 off — static-site perf로 수치 확인 후 최종 확인 |
-| Q10 | `_tagstate` TTL 없음(태그 수로 한정, volatile-lru 비축출 = 의도) |
-| Q11 | 프리릴리스는 `next` 브랜치 pre 모드, master는 1.x 핫픽스 게시 가능 유지 |
-| Q12 | 메트릭은 `onEvent` 훅만 제공 |
-| Q13 | 커버리지·mutation 게이트는 2.0.0부터 차단, 그 전엔 리포트 |
-| Q14 | perf는 GitHub 호스티드 러너, 결정론 지표만 하드 게이트 |
-| Q15 | canary는 nightly/weekly 실패 허용 + 이슈 알림 |
-| Q16 | 외부 커버리지 서비스 없음(artifact + Step Summary) |
-| Q17 | Windows CI는 docker 불필요 계층만. docker 계층은 로컬 Docker Desktop 수동 + Linux CI |
-| Q18 | (2026-09-29 사용자) PR 없이 CI 검증: ci.yml `push.branches`에 `feat/**`. 기능 브랜치 push만 허용(master·next push, force-push, npm 게시 금지) |
-| Q19 | (2026-09-29 사용자) Next 변형은 16.1.x·16.3.x 최신 패치 정확 고정 + 맞는 react. canary는 비고정·nightly 전용·실패 허용 |
+| Q1 | Ship the 1.1.0 hotfix first, then 2.0 |
+| Q2 | Drop Next 15 support, peer `next ^16.1` |
+| Q3 | Disk (build output) fallback on by default. Next internal paths guarded + matrix contract tests |
+| Q4 | Tag state is namespace-global |
+| Q5 | Lazy invalidation only (no reverse index, no eagerDelete option) |
+| Q6 | Compression starts at none, decided again after P6 measurements |
+| Q7 | Default timeouts read 1000 ms / write 2000 ms |
+| Q8 | Minimum supported Redis 6.2, HEXPIRE optional on 7.4+ |
+| Q9 | Prewarm off by default in the package and in docs - confirmed after static-site perf numbers |
+| Q10 | No TTL on `_tagstate` (bounded by the tag count, not evicted under volatile-lru = intended) |
+| Q11 | Prereleases in pre mode on the `next` branch, master can still publish 1.x hotfixes |
+| Q12 | Metrics only through the `onEvent` hook |
+| Q13 | Coverage and mutation gates block from 2.0.0, report-only before |
+| Q14 | perf on GitHub-hosted runners, only deterministic metrics are hard gates |
+| Q15 | canary allowed to fail in nightly/weekly + issue notification |
+| Q16 | No external coverage service (artifacts + step summary) |
+| Q17 | Windows CI runs Docker-free layers only. Docker layers: local Docker Desktop by hand + Linux CI |
+| Q18 | (2026-09-29, user) CI without PRs: `feat/**` in ci.yml `push.branches`. Only feature-branch pushes (no master/next pushes, no force-push, no npm publish) |
+| Q19 | (2026-09-29, user) Next variants pinned to the latest 16.1.x and 16.3.x patches + matching react. canary unpinned, nightly only, allowed to fail |
+| Q20 | (2026-09-29, user) Everything in the repository is English, including Markdown and commit messages. Enforced by `check-no-hangul` (all files) and `check-commit-messages` (`origin/master..HEAD`). The existing Korean commit messages on `feat/test-infra` were rewritten to English and force-pushed at the user's request (trees byte-identical) |
 
-### 8.1 실행 중 결정 (P0c~P0e, 사용자가 위임한 범위에서 에이전트가 결정)
+### 8.1 Decisions made during execution (within the scope the user delegated)
 
-| # | 결정 | 이유 |
+| # | Decision | Reason |
 |---|---|---|
-| D1 | 테스트 앱은 JS(.jsx/.mjs) | 변형에 typescript 불필요, 빌드 가벼움. 타입은 contract-types가 검증 |
-| D2 | 테스트 훅 경로 `/api/nrc-test/*` | `__test`는 App Router private folder |
-| D3 | v1 어댑터 = README Quick Start 배선 그대로 | 재현 테스트가 실제 사용자 경험을 봐야 함 |
-| D4 | 재현 규약: `itRepro`/`repro()`/`@ts-expect-error [7-x]` + `NRC_REPRO=show` | 수정 커밋이 표식을 지워야만 green, 증거 출력 가능 |
-| D5 | perf 결정론 지표 = MONITOR로 센 요청당 명령 수 | `INFO commandstats`는 서버 전역이라 섞임 |
-| D6 | mutation = Stryker command runner | vitest-runner 10.0.0 + vitest 5에서 변이별 테스트 0건 보고 |
-| D7 | e2e 셀마다 앱 빌드, 브라우저 설치 없음 | 빌드 30~40초 < standalone artifact 이동, 서버 액션은 폼 제출로 검증 |
-| D8 | nightly.yml·chaos.yml을 바꾸는 `feat/**` push에서 nightly 1회 실행(주간 job 포함) | schedule은 기본 브랜치에서만 돌아 머지 전 검증 수단이 없음 |
-| D9 | release 필수 chaos 부분집합 = C1·C9·C11·C12(현재 구현분) | C3·C7은 해당 단계에서 추가 |
-| D10 | static-site 본문 100~250KB 텍스트(HTML 200~500KB) | 1MB HTML은 로컬 반복이 과도 |
-| D11 | (P1) 7-1: `updateTags(tags, durations)`도 `now` 기록(SWR 아님). 1.0.x가 남긴 `now+60초` 초과 시각은 읽을 때 `now`로 간주하고 HSET으로 덮어씀 | 스키마 불변(태그당 값 1개)으로는 stale/expired 구분 불가 — 미스 1회 후 정상이 1년 미스보다 낫고 Next 기본(stale 1회 제공)에 가장 가깝다. 치유가 없으면 업그레이드해도 오염된 태그가 최대 1년 남는다. 60초 = 인스턴스 간 시계 오차 허용. 치유 HSET과 동시 updateTags 사이 수 ms 역행 가능(문서화) |
-| D12 | (P1) `cleanupOldBuildKeys`는 Redis 때문에 reject하지 않는다: `timeoutMs`(기본 5000, 연결·명령), `reconnectStrategy:false`, 실패 시 warn 후 지운 수로 resolve | README 배선이 instrumentation에서 await한다 — reject는 기동 실패, 1.0.6은 무한 대기였다 |
-| D13 | (P1) 오류 로깅 = 핸들러별 `ErrorReporter`: 전이 시 warn, 분당 최대 1회 요약, 복구 시 info 1회. 키는 120자로 자름 | 매 요청 로그는 장애 중 홍수, debug 게이트는 무음(7-7). logger 옵션·onEvent는 2.0(5.3) |
-| D14 | (P1) peer `@redis/client` `^5.0.0 \|\| ^6.0.0`, CI에 6 셀(integration+typecheck) | 6.2.1로 로컬 검증 통과(RESP3 기본). `>=5`는 미검증 7.x까지 허용 |
-| D15 | (P1) `engines.node >=18.18.0` | 1.x peer가 Next 15(>=18.18)를 허용. 2.0에서 `>=20.9` |
-| D16 | (P1) release: changesets/action v1.9.0 SHA 고정, `npm@11.20.0` 고정 설치, setup-node `registry-url` 없음, `NPM_CONFIG_PROVENANCE=true` | v2는 Changesets v3 필요. npm 버전 고정은 액션 SHA 고정과 같은 공급망 이유 |
-| D17 | (P1) README Quick Start를 1초 상한 connect race로 바꿨지만 테스트 앱 v1 어댑터는 1.0.x README 배선 유지 | D3(기존 사용자 경험 재현) 유지 — 7-2 재현(C1·C9)이 그대로 의미를 가진다. 새 배선은 fault 테스트로 검증 |
-| D18 | (P1) e2e full-legacy pinned 'max' 재현을 7-1 → 7-6으로 재분류, oracle(durations)은 7-1 재현으로 유지(P2) | 1.1.0 뒤 남은 원인이 각각 레거시 삭제·SWR/Next getExpiration 의미 차이 |
-| D19 | (P1) perf `--as <버전>` 추가, 기준선 `1.1.0.json`(JSON에 `packageVersionField: 1.0.6`) | changeset version 전이라 설치본 version이 1.0.6 — 그대로 쓰면 1.0.6.json을 덮어쓴다 |
+| D1 | Test apps in JS (.jsx/.mjs) | no typescript in the variants, lighter builds. Types are checked by contract-types |
+| D2 | Test hook path `/api/nrc-test/*` | `__test` is an App Router private folder |
+| D3 | v1 adapter = the 1.0.x README Quick Start wiring as-is | reproductions must see the real user experience |
+| D4 | Reproduction convention: `itRepro` / `repro()` / `@ts-expect-error [7-x]` + `NRC_REPRO=show` | only green when the fixing commit removes the marker; evidence can be printed |
+| D5 | Deterministic perf metric = commands per request counted with MONITOR | `INFO commandstats` is server-global and mixed |
+| D6 | mutation = Stryker command runner | vitest-runner 10.0.0 + vitest 5 reports zero tests per mutant |
+| D7 | Each e2e cell builds its app, no browser install | a 30..40 s build < moving standalone artifacts; server actions are verified by form submission |
+| D8 | A `feat/**` push that changes nightly.yml or chaos.yml runs nightly once (weekly jobs included) | schedules only run on the default branch, so there is no other pre-merge check |
+| D9 | Required release chaos subset = C1, C9, C11, C12 (implemented so far) | C3 and C7 join in their phases |
+| D10 | static-site body 100..250 KB text (HTML 200..500 KB) | 1 MB HTML is too heavy for local iteration |
+| D11 | (P1) 7-1: `updateTags(tags, durations)` also records `now` (not SWR). A time more than 60 s in the future (left by 1.0.x) is treated as `now` when read and rewritten with a best-effort HSET (not awaited, failures ignored) | With one value per tag (schema unchanged) stale and expired cannot be told apart - one miss then normal is better than a year of misses and closest to Next's default (serve stale once). Without healing, polluted tags would stay up to a year after upgrading. 60 s = clock skew allowance between instances. A concurrent updateTags between the read and the heal can be moved back by a few ms (documented) |
+| D12 | (P1) `cleanupOldBuildKeys` never rejects because of Redis: `timeoutMs` (default 5000, connect and commands), `reconnectStrategy:false`, on failure warn and resolve with the number deleted so far | The README awaits it in instrumentation - a reject fails startup; 1.0.6 waited forever |
+| D13 | (P1) Error logging = one `ErrorReporter` per handler: warn on the transition, a summary at most once a minute, info once on recovery. Keys cut at 120 chars. Only Redis round trips count (a failed render is not reported; calls without tags are not a recovery) | Logging every request floods logs during an outage; the debug gate was silent (7-7). logger option and onEvent come in 2.0 (5.3) |
+| D14 | (P1) peer `@redis/client` `^5.0.0 \|\| ^6.0.0`, a 6 cell in CI (integration + typecheck) | 6.2.1 verified locally (RESP3 by default). `>=5` admitted an unverified 7.x |
+| D15 | (P1) `engines.node >=18.18.0` | the 1.x peer admits Next 15 (>= 18.18). `>=20.9` in 2.0 |
+| D16 | (P1) release: changesets/action v1.9.0 pinned to a SHA, `npm@11.20.0` installed at a fixed version, no setup-node `registry-url`, `NPM_CONFIG_PROVENANCE=true` | v2 needs Changesets v3. Pinning npm has the same supply-chain reason as pinning actions |
+| D17 | (P1) The README Quick Start uses a 1 s bounded connect race, but the test apps' v1 adapter keeps the 1.0.x README wiring | keeps D3 (reproduce the existing user experience) - the 7-2 reproductions (C1, C9) stay meaningful. The new wiring is verified by a fault test |
+| D18 | (P1) The e2e full-legacy pinned 'max' reproduction moved from 7-1 to 7-6; oracle (durations) stays a 7-1 reproduction (P2) | after 1.1.0 the remaining causes are the legacy deletion and the SWR / Next getExpiration semantics respectively |
+| D19 | (P1) perf `--as <version>`, baseline `1.1.0.json` (with `packageVersionField: 1.0.6`) | before `changeset version` the installed version is still 1.0.6 - writing as-is would overwrite 1.0.6.json |
+| D20 | (P1) Commit-message check over `origin/master..HEAD` | the branch history was rewritten to English, so the whole range can be enforced |
 
 ---
 
-## 9. 리스크
+## 9. Risks
 
-- Next 내부 경로(`next/dist/server/lib/incremental-cache/file-system-cache.js`) 의존 — 매트릭스 계약 테스트로 조기 탐지.
-- Next 16.x 마이너 변화(16.3의 음수 expire 표식 등) — canary 매트릭스.
-- 클럭 스큐: 항목 timestamp·태그 상태 모두 Pod 시계 — 노드 NTP 전제, C14로 허용 범위 확인.
-- AOF 재시작 시 태그 상태 롤백 가능(운영 `values.yaml`에 옛 AOF 로드 함정 기록) — 영향은 미스 증가.
-- 빌드 시간: full 매트릭스는 캐시 없으면 60분 초과 가능 → `app×Next` 6벌만 빌드, Redis 셀은 artifact 재사용.
-- cacheComponents와 segment config 호환성 미확인 → P0c에서 확정.
-- fleet의 `node server.js`는 standalone 조립(`.next/static` 복사 등, docs `Dockerfile:31-40`과 동일)을 `prepare-app`이 재현해야 함.
-- OIDC + changesets/action 조합 미검증 → 첫 게시는 프리릴리스로.
-- 외부 사용자(월 4.4k 다운로드 추정) → 2.0 마이그레이션 가이드 필수, 1.x 핫픽스 유지.
-- ~~`@redis/client` 6.x 미검증~~ → P1에서 해소(D14). 남은 것: 6 셀은 fault·oracle(mini-redis RESP2 전용)을 돌리지 않는다. 2.0에서 mini-redis에 `HELLO`/RESP3를 넣거나 테스트 클라이언트를 RESP2로 고정해 채운다.
-- 1.0.x → 1.1.0 롤링 중 옛 Pod는 여전히 `now+expire`를 쓴다 → 새 Pod가 읽을 때 치유(D11). 옛 Pod끼리는 1.0.x 동작 그대로.
-- 신뢰 게시 설정은 2FA 대화형 인증이 필요하다 — 2FA 우회 토큰으로는 `npm trust`도 웹 설정도 대신할 수 없다.
-- Stryker vitest-runner가 vitest 5를 제대로 지원하면 per-test 커버리지 모드로 되돌린다(현재 command runner라 변이마다 전체 실행).
-- Windows 로컬의 Defender 첫 열람 지연 — `.work/` 예외 권장(prepare-app이 흡수하지만 static-site 1벌에 3분 이상).
+- Dependency on Next internal paths (`next/dist/server/lib/incremental-cache/file-system-cache.js`) - detected early by matrix contract tests.
+- Next 16.x minor changes (e.g. the negative-expire marker in 16.3) - canary matrix.
+- Clock skew: entry timestamps and tag state both use the pod clock - assumes NTP on the nodes; C14 checks the tolerance.
+- An AOF restart can roll back tag state (the production `values.yaml` documents the old-AOF-load trap) - impact is more misses.
+- Build time: without caches the full matrix can exceed 60 min -> build only `app x Next` (6), Redis cells reuse artifacts.
+- cacheComponents vs. segment config compatibility unconfirmed -> confirmed in P0c.
+- The fleet's `node server.js` requires `prepare-app` to reproduce the standalone assembly (copying `.next/static` etc., same as docs `Dockerfile:31-40`).
+- OIDC + changesets/action untested -> first publish as a prerelease (P1 checked the action source; the real publish is still pending).
+- External users (~4.4k downloads/month) -> a 2.0 migration guide is required, 1.x hotfixes continue.
+- ~~`@redis/client` 6.x unverified~~ -> resolved in P1 (D14). Remaining: the 6 cell does not run fault and oracle (mini-redis is RESP2-only). In 2.0 add `HELLO`/RESP3 to mini-redis or pin the test clients to RESP2.
+- During a 1.0.x -> 1.1.0 rolling update old pods still write `now+expire` -> healed when a new pod reads it (D11). Old pods among themselves behave like 1.0.x.
+- Configuring trusted publishing needs interactive 2FA - a 2FA-bypass token cannot replace `npm trust` or the web settings.
+- Once Stryker's vitest-runner supports vitest 5 properly, go back to per-test coverage mode (the command runner runs everything per mutant).
+- Windows Defender delays the first read of new files locally - exclude `.work/` (prepare-app absorbs it, but one static-site build takes 3+ minutes).
 
 ---
 
-## 10. 진행 기록
+## 10. Progress log
 
-| 날짜 | 단계 | 내용 |
+| Date | Phase | Content |
 |---|---|---|
-| 2026-09-29 | — | 감사·계획·테스트 환경 설계 확정, 이 문서 작성 |
-| 2026-09-29 | — | 사용자 결정: 코드(비 .md 파일)는 영어만, `check-no-hangul` 게이트 추가 |
-| 2026-09-29 | P0a | 완료(로컬). typecheck·build·lint·test(35)·quality 통과, `check-pack`·`check-no-hangul` 음성 시험(위반 주입 시 exit 1) 확인. 빌드 산출물이 npm 1.0.6 tarball의 dist와 바이트 동일(=src 동작 불변). CI는 push 전이라 미실행 |
-| 2026-09-29 | P0b | 완료(로컬, Windows Docker Desktop 28.5.2). `infra:up`(기본·`all`·16mb 전환)·`infra:down`, integration 스모크 Redis 7.2.16/8.4.7 각 10건, toxic 4종(latency·timeout·reset_peer·bandwidth) 제어 스모크, fault 계층 5회 반복 무결, `test:all` 76건 통과. **Linux CI의 `infra:up`은 push 전이라 미검증** |
-| 2026-09-29 | P0b | Linux CI 검증: `feat/**` push 트리거(Q18) 추가 후 첫 실행 [36513562634](https://github.com/mirunamu00/next-redis-cache/actions/runs/36513562634) 8 job 전부 성공(fault job의 `infra:up -- redis84 toxiproxy`, integration 7.2/8.4 포함) → P0b 완료 기준 전부 충족 |
-| 2026-09-29 | P0c | 완료. 3앱 × 16.1.7·16.3.6 standalone 빌드(로컬 Windows·CI Linux), `npm ls` 단일 인스턴스 검사 통과, **npm 1.0.6 tarball**로 fleet 2인스턴스 e2e: 16.3 18건·16.1 18건 통과(스모크 13 + 기대 실패 5). cacheComponents 제약 빌드 오류로 확인. contract-types 16.1·16.3 통과. CI [36520127962](https://github.com/mirunamu00/next-redis-cache/actions/runs/36520127962)에서 setup·contract 2·e2e 3·perf 포함 15 job 성공. 계획 대비 변경은 6.2·6.3·6.4·8.1절 |
-| 2026-09-29 | P0d | 완료. 7-1~7-13 전부 + A2를 1.0.6에서 재현(6.9절 표, `NRC_REPRO=show` 출력으로 확인). vitest 기대 실패 50건(unit 9·fault 6·integration 17×2버전·contract 1) + chaos 10건 + e2e 5건 + tsc 2건. 로컬 `test:all` 87 통과 + 50 기대 실패, `test:chaos` 3 통과 + 10 기대 실패. perf 기준선 `tests/perf/baseline/1.0.6.json`(레거시 히트 3명령, use-cache 페이지 8명령, static-site 1벌 123키·116,060,896바이트) 커밋, CI perf 게이트가 Linux에서 같은 기준선으로 통과 |
-| 2026-09-29 | P1 | 게시 준비 완료(feat/test-infra). 7-1·7-3·7-4·7-7·7-9·7-10 수정 + 패키징(조건별 types·engines·repository·peer `@redis/client ^5\|\|^6`) + release.yml OIDC + README(7-13 중 P1 항목) + changeset(minor) + perf 기준선 1.1.0. 전환 현황·로컬 결과는 6.9절, 결정은 D11~D19, 게시 절차는 11절. CI는 11절 표 |
-| 2026-09-29 | P0e | 완료. nightly를 `feat/**` push로 1회 완주: [36521161066](https://github.com/mirunamu00/next-redis-cache/actions/runs/36521161066) 34 job 중 33 성공·1 skip(report, schedule 전용), 22분 — ci level=full(e2e 12셀 = 3앱×[16.1,16.3]×[7.2,8.4], contract 16.1·16.3·canary, perf+timing, 병합 커버리지), chaos 전체, quarantine, e2e Node 24 3앱, mutation(22.3분), canary e2e. release는 `needs: [gate, chaos]`로 ci full + chaos 부분집합 없이는 게시 불가(actionlint 통과). mutation 점수 27.6%(로컬, 671 변이 — integration 계층이 빠진 docker 불필요 테스트 기준, 리포트 전용) |
+| 2026-09-29 | - | Audit, plan and test environment design finalized, this document written |
+| 2026-09-29 | - | User decision: code (non-.md files) English only, `check-no-hangul` gate added |
+| 2026-09-29 | P0a | Done (local). typecheck, build, lint, test (35), quality pass; negative tests of `check-pack` and `check-no-hangul` (exit 1 on injected violations). Build output byte-identical to the dist in the npm 1.0.6 tarball (= src behavior unchanged). CI not run yet (not pushed) |
+| 2026-09-29 | P0b | Done (local, Windows Docker Desktop 28.5.2). `infra:up` (default, `all`, 16mb switch) and `infra:down`, integration smoke on Redis 7.2.16/8.4.7 (10 each), control smoke of 4 toxics (latency, timeout, reset_peer, bandwidth), fault layer clean over 5 repetitions, `test:all` 76 passed. **`infra:up` on Linux CI not verified yet (not pushed)** |
+| 2026-09-29 | P0b | Linux CI verified: first run after adding the `feat/**` push trigger (Q18) [36513562634](https://github.com/mirunamu00/next-redis-cache/actions/runs/36513562634), all 8 jobs green (including the fault job's `infra:up -- redis84 toxiproxy` and integration 7.2/8.4) -> every P0b criterion met |
+| 2026-09-29 | P0c | Done. 3 apps x 16.1.7 and 16.3.6 standalone builds (local Windows and CI Linux), `npm ls` single-instance check passes, 2-instance fleet e2e with the **npm 1.0.6 tarball**: 18 on 16.3 and 18 on 16.1 (13 smoke + 5 expected failures). cacheComponents constraint confirmed by build errors. contract-types 16.1 and 16.3 pass. CI [36520127962](https://github.com/mirunamu00/next-redis-cache/actions/runs/36520127962): 15 jobs green including setup, 2 contract, 3 e2e and perf. Differences from the plan in 6.2, 6.3, 6.4 and 8.1 |
+| 2026-09-29 | P0d | Done. All of 7-1..7-13 + A2 reproduced on 1.0.6 (table in 6.9, confirmed with `NRC_REPRO=show`). 50 vitest expected failures (unit 9, fault 6, integration 17 x 2 versions, contract 1) + 10 chaos + 5 e2e + 2 tsc. Local `test:all` 87 passed + 50 expected failures, `test:chaos` 3 passed + 10 expected failures. perf baseline `tests/perf/baseline/1.0.6.json` (legacy hit 3 commands, use-cache page 8 commands, static-site build 123 keys, 116,060,896 bytes) committed; the CI perf gate passes on Linux against the same baseline |
+| 2026-09-29 | P0e | Done. nightly completed once via a `feat/**` push: [36521161066](https://github.com/mirunamu00/next-redis-cache/actions/runs/36521161066) 33 of 34 jobs green, 1 skipped (report, schedule only), 22 min - ci level=full (12 e2e cells = 3 apps x [16.1, 16.3] x [7.2, 8.4], contract 16.1, 16.3, canary, perf + timing, merged coverage), all chaos, quarantine, e2e on Node 24 (3 apps), mutation (22.3 min), canary e2e. release has `needs: [gate, chaos]`, so it cannot publish without ci full + the chaos subset (actionlint passes). Mutation score 27.6% (local, 671 mutants - Docker-free tests without the integration layer, report-only) |
+| 2026-09-29 | P1 | Ready to publish (feat/test-infra). Fixes 7-1, 7-3, 7-4, 7-7, 7-9, 7-10 + packaging (conditional types, engines, repository, peer `@redis/client ^5 \|\| ^6`) + OIDC release.yml + README (the P1 part of 7-13) + changeset (minor) + perf baseline 1.1.0. Conversion status and local results in 6.9, decisions D11..D20, publishing in section 11. CI: [36528242579](https://github.com/mirunamu00/next-redis-cache/actions/runs/36528242579) (17 jobs green, including the @redis/client 6 cell and unit-windows), [36528501162](https://github.com/mirunamu00/next-redis-cache/actions/runs/36528501162) green |
+| 2026-09-29 | P1 | User decision Q20: Markdown and commit messages English too. This document, `tests/perf/README.md` and `tests/fixtures/next-build/README.md` translated; `check-no-hangul` covers Markdown; `check-commit-messages` added (`origin/master..HEAD`); branch history rewritten to English and force-pushed (e2e277a) |
 
 ---
 
-## 11. 1.1.0 게시 절차 (P1 결과)
+## 11. Publishing 1.1.0 (P1 result)
 
-전제: `feat/test-infra`를 master로 병합(= release.yml이 돈다). **이 브랜치에서는 게시하지 않는다**(Q18).
+Precondition: `feat/test-infra` merged into master (= release.yml runs). **Nothing is published from this branch** (Q18).
 
-### 11.1 권장 — 신뢰 게시(OIDC) + provenance
+### 11.1 Recommended - trusted publishing (OIDC) + provenance
 
-1. 신뢰 게시자 등록(1회, 사용자 — 2FA 계정 로그인 필요):
-   - 웹: npmjs.com → `@mirunamu/next-redis-cache` → Settings → Trusted Publisher → GitHub Actions, Organization or user `mirunamu00`, Repository `next-redis-cache`, Workflow filename `release.yml`, Environment 비움.
-   - 또는 CLI(npm ≥11.15.0, 로컬 Node 22.21이라 npm 11 사용):
+1. Register the trusted publisher (once, by the user - needs a 2FA account login):
+   - Web: npmjs.com -> `@mirunamu/next-redis-cache` -> Settings -> Trusted Publisher -> GitHub Actions, Organization or user `mirunamu00`, Repository `next-redis-cache`, Workflow filename `release.yml`, Environment empty.
+   - Or the CLI (npm >= 11.15.0; the local Node 22.21 needs npm 11):
      ```
      npx -y npm@11.20.0 login
      npx -y npm@11.20.0 trust github @mirunamu/next-redis-cache --file release.yml --repository mirunamu00/next-redis-cache --allow-publish
      npx -y npm@11.20.0 trust list @mirunamu/next-redis-cache
      ```
-     (`--dry-run --json`으로 확인한 페이로드: `{"package":"@mirunamu/next-redis-cache","file":"release.yml","repository":"mirunamu00/next-redis-cache","permissions":["createPackage"]}`. 2FA 우회 granular 토큰으로는 거부된다.)
-2. master에 병합·push → release.yml: gate(ci full) + chaos(C1·C9·C11·C12) 통과 후 changesets/action이 "chore: release" PR(1.0.6→1.1.0, CHANGELOG)을 연다. (저장소 설정 "Allow GitHub Actions to create and approve pull requests"가 켜져 있어야 한다.)
-3. 그 PR을 병합 → 다시 release.yml → 미게시 changeset이 없으므로 `changeset publish` → npm 11.20.0이 OIDC로 게시 + provenance, 태그 `v1.1.0`·GitHub Release 생성.
-4. 확인: `npm view @mirunamu/next-redis-cache@1.1.0 dist.attestations`(provenance), npmjs.com 페이지의 "Built and signed on GitHub Actions".
-5. 이후(사용자): 패키지 Settings → "Require two-factor authentication and disallow tokens", `NPM_TOKEN` 시크릿·토큰 폐기.
+     (Payload checked with `--dry-run --json`: `{"package":"@mirunamu/next-redis-cache","file":"release.yml","repository":"mirunamu00/next-redis-cache","permissions":["createPackage"]}`. A granular token that bypasses 2FA is rejected.)
+2. Merge and push to master -> release.yml: after the gate (ci full) and chaos (C1, C9, C11, C12) pass, changesets/action opens the "chore: release" PR (1.0.6 -> 1.1.0, CHANGELOG). (The repository setting "Allow GitHub Actions to create and approve pull requests" must be on.)
+3. Merge that PR -> release.yml again -> no pending changesets, so `changeset publish` -> npm 11.20.0 publishes through OIDC with provenance, creates the `v1.1.0` tag and the GitHub release.
+4. Verify: `npm view @mirunamu/next-redis-cache@1.1.0 dist.attestations` (provenance), "Built and signed on GitHub Actions" on the npmjs.com page.
+5. Afterwards (user): package Settings -> "Require two-factor authentication and disallow tokens", revoke the `NPM_TOKEN` secret and token.
 
-### 11.2 대안 — 로컬 게시(토큰, provenance 없음)
+### 11.2 Fallback - local publish (token, no provenance)
 
-신뢰 게시 설정 전에 1.1.0을 먼저 내야 할 때. 토큰은 파일에 쓰지 않고 env로만 넘기며, 레포 밖 임시 userconfig를 쓴다.
+When 1.1.0 has to go out before trusted publishing is configured. The token is never written to a file, only passed through the environment, with a temporary userconfig outside the repository.
 
 ```bash
-git switch master && git pull --ff-only          # feat/test-infra 병합 후
+git switch master && git pull --ff-only          # after merging feat/test-infra
 git switch -c release/1.1.0
 npm ci
-# changelog-github이 GitHub API로 커밋/PR 정보를 읽어 GITHUB_TOKEN이 필요하다(읽기 권한 PAT면 충분).
-GITHUB_TOKEN=<github-pat> npx changeset version   # package.json 1.1.0, CHANGELOG.md, .changeset/hotfix-1-1-0.md 삭제
+# changelog-github reads commit/PR data from the GitHub API and needs GITHUB_TOKEN (a read-only PAT is enough).
+GITHUB_TOKEN=<github-pat> npx changeset version   # package.json 1.1.0, CHANGELOG.md, deletes .changeset/hotfix-1-1-0.md
 npm run build && npm run quality && npm test
 git commit -am "chore: release 1.1.0"
-# 게시: 레포 밖 임시 userconfig에 토큰 변수 참조만 쓴다(값은 env로)
+# Publish: the temporary userconfig outside the repo only references the token variable (value via env)
 NPMRC="$(mktemp)"; printf '//registry.npmjs.org/:_authToken=${NPM_TOKEN}\n' > "$NPMRC"
-NPM_TOKEN=<npm-token> NPM_CONFIG_USERCONFIG="$NPMRC" npm publish --access public   # prepublishOnly가 다시 빌드
+NPM_TOKEN=<npm-token> NPM_CONFIG_USERCONFIG="$NPMRC" npm publish --access public   # prepublishOnly builds again
 rm -f "$NPMRC"
 git tag v1.1.0
 ```
 
-- GitHub 토큰이 없으면 `changeset version` 대신 수동: `npm version 1.1.0 --no-git-tag-version`, `.changeset/hotfix-1-1-0.md` 본문을 `CHANGELOG.md` 맨 위 `## 1.1.0` / `### Minor Changes` 아래에 옮기고 파일 삭제.
-- PowerShell이면 `$env:NPM_TOKEN`·`$env:NPM_CONFIG_USERCONFIG`로 같은 값을 설정하고 끝나면 `Remove-Item Env:NPM_TOKEN`.
-- 순서 주의: 버전 커밋을 master에 push하면 release.yml이 돈다. **로컬 게시를 먼저** 끝내야 release job의 `changeset publish`가 "1.1.0 이미 게시됨"으로 아무것도 하지 않는다(신뢰 게시 미설정 상태에서 먼저 push하면 게시 단계가 인증 실패로 빨간불).
-- 로컬 게시는 provenance를 만들 수 없다(`--provenance`는 지원 CI에서만).
-
+- Without a GitHub token, instead of `changeset version`: `npm version 1.1.0 --no-git-tag-version`, move the body of `.changeset/hotfix-1-1-0.md` to the top of `CHANGELOG.md` under `## 1.1.0` / `### Minor Changes`, delete the file.
+- In PowerShell set the same values with `$env:NPM_TOKEN` and `$env:NPM_CONFIG_USERCONFIG`, then `Remove-Item Env:NPM_TOKEN`.
+- Order matters: pushing the version commit to master runs release.yml. **Finish the local publish first** so the release job's `changeset publish` finds 1.1.0 already published and does nothing (pushing first without trusted publishing makes the publish step fail on authentication).
+- A local publish cannot produce provenance (`--provenance` only works on supported CI).

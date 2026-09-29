@@ -1,4 +1,4 @@
-// Gate: fails if any non-Markdown file in the repository contains Hangul.
+// Gate: fails if any file in the repository (Markdown included) contains Hangul.
 // Scans tracked files plus untracked files that are not ignored, so new files are caught before commit.
 // Usage: node scripts/check-no-hangul.mjs
 import { fileURLToPath } from "node:url";
@@ -34,7 +34,7 @@ for (const file of files) {
 }
 
 if (offenders.length > 0) {
-  console.error("[check-no-hangul] Hangul found in non-Markdown files (code must be English-only):");
+  console.error("[check-no-hangul] Hangul found (this repository is English-only):");
   for (const { file, hits } of offenders) {
     for (const h of hits.slice(0, 5)) console.error(`  ${file}:${h.line}: ${h.text.slice(0, 120)}`);
     if (hits.length > 5) console.error(`  ${file}: ... ${hits.length - 5} more line(s)`);

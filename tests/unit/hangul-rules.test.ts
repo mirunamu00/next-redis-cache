@@ -1,4 +1,4 @@
-// Tests for the "no Hangul in code" gate rules.
+// Tests for the "no Hangul" gate rules.
 // Hangul samples are built from code points so this file itself stays free of Hangul.
 import { describe, expect, it } from "vitest";
 import { findHangulLines, HANGUL_RANGES, isChecked } from "../../scripts/lib/hangul-rules.mjs";
@@ -12,9 +12,9 @@ describe("isChecked", () => {
     }
   });
 
-  it("exempts Markdown documents", () => {
+  it("checks Markdown documents too", () => {
     for (const f of ["ROADMAP.md", "README.md", "CHANGELOG.md", ".changeset/README.md", "docs/Guide.MD"]) {
-      expect(isChecked(f)).toBe(false);
+      expect(isChecked(f)).toBe(true);
     }
   });
 });

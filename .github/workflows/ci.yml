@@ -1,7 +1,7 @@
 # CI - quality gate (ROADMAP.md section 6.8)
 #
 # Job graph (P0e):
-#   static (no-hangul, quarantine, lint, typecheck, build, quality) --+
+#   static (no-hangul, commit-messages, quarantine, lint, typecheck, build, quality) --+
 #   unit (Node 22, 24)                                                |
 #   unit-windows (layers that need no Docker)                         |
 #   integration (Redis 7.2, 8.4 via testcontainers; + @redis/client 6) +-- gate (the only required
@@ -47,13 +47,17 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
-      - name: No Hangul in code
+      - name: No Hangul in the repository
         run: npm run check-no-hangul
+      - name: No Hangul in commit messages
+        run: node scripts/check-commit-messages.mjs
       - name: Quarantined tests have an issue and an unexpired deadline
         run: node scripts/check-quarantine.mjs
       - run: npm run lint

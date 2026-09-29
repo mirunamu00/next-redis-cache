@@ -1,7 +1,8 @@
-// Rules for the "no Hangul in code" gate. Shared by scripts/check-no-hangul.mjs and its unit test.
+// Rules for the "no Hangul" gate. Shared by scripts/check-no-hangul.mjs and its unit test.
 //
-// Policy: every non-Markdown file in the repository (source, tests, scripts, configs, workflows)
-// must be free of Hangul. Markdown documents (ROADMAP.md, README.md, CHANGELOG.md, ...) are exempt.
+// Policy: this is a public, international package. Every file in the repository (source, tests,
+// scripts, configs, workflows and Markdown documents) must be free of Hangul. Commit messages are
+// covered by scripts/check-commit-messages.mjs.
 
 /** Hangul Jamo (U+1100-U+11FF), Compatibility Jamo (U+3130-U+318F), Syllables (U+AC00-U+D7AF). */
 export const HANGUL_RANGES = [
@@ -19,7 +20,7 @@ export const HANGUL_RE = new RegExp(`[${charClass}]`);
  * @param {string} file forward-slash path relative to the repo root
  */
 export function isChecked(file) {
-  return !/\.md$/i.test(file);
+  return typeof file === "string" && file.length > 0;
 }
 
 /**

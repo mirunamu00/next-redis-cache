@@ -85,8 +85,5 @@ jobs:
         env:
           # changelog-github (changeset version) and the release PR need it; not an npm credential
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # npm auth: when the NPM_TOKEN secret is set, changesets/action writes it to .npmrc and publishes
-          # with the token; when it is empty, it falls back to trusted publishing (OIDC). Provenance works
-          # in both cases because the job has id-token: write.
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          # npm auth is trusted publishing (OIDC) only; no npm token is used. Provenance comes from id-token: write.
           NPM_CONFIG_PROVENANCE: "true"

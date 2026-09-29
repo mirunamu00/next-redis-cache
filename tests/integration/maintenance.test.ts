@@ -80,8 +80,10 @@ describe.each(redisVersionsUnderTest())("Redis %s", (version) => {
     });
     try {
       expect((await done).cleanup).toMatchObject({ gaveUp: false, value: { deferredBuilds: ["A"] } });
-      await waitFor(async () => (await client.exists(`${ns}:A:e:/page`)) === 0, { timeout: 6000, message: "A removed without a restart" });
+      // the keys go first, the registry entry at the end of the same pass
+      await waitFor(async () => (await client.zRange(`${ns}:_builds`, 0, -1)).length === 2, { timeout: 6000, message: "A removed without a restart" });
       expect(await client.zRange(`${ns}:_builds`, 0, -1)).toEqual(["B", "C"]);
+      expect(await client.exists(`${ns}:A:e:/page`)).toBe(0);
     } finally {
       stop();
     }

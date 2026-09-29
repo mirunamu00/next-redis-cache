@@ -88,7 +88,8 @@ describe.concurrent("rechecks of deferred builds (7-15)", () => {
       old.release();
       const registered = await e.client.zScore("docs:_builds", "C");
       // nobody reads A any more: it is removed within minIdleSeconds (+ a margin)
-      await waitFor(() => !e.buildsLeft().includes("A"), { timeout: 4000, message: "A removed without a restart" });
+      // (wait for the log line: it is written after the whole pass, the keys are gone before the registry is updated)
+      await waitFor(() => lines.length === 2, { timeout: 4000, message: "recheck without a restart" });
       expect(e.buildsLeft()).toEqual(["B"]);
       expect(lines.at(-1)).toBe("[next-redis-cache] cleanup recheck 1 of 3: deleted 3 keys; removed builds A; kept C (current), B (previous)");
       // a recheck does not register the build again

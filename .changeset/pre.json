@@ -4,5 +4,7 @@
   "initialVersions": {
     "@mirunamu/next-redis-cache": "1.1.0"
   },
-  "changesets": []
+  "changesets": [
+    "v2-major"
+  ]
 }

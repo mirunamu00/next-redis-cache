@@ -211,7 +211,7 @@ describe("connectRedis", () => {
 
   // 7-14 (production verification of 2.0.0-next.0): "docs: not connected within 1000ms; connecting in the
   // background" was followed by "docs: connected to redis://... again" although it never had been connected
-  it.fails("[7-14] the first connection after a slow start is not logged as a reconnection", async () => {
+  it("[7-14] the first connection after a slow start is not logged as a reconnection", async () => {
     vi.useFakeTimers();
     h.behavior = "hang";
     const p = connectRedis("redis://h11:6379", { waitMs: 100, label: "docs", logger: logger() });

@@ -62,12 +62,15 @@ async function open(url: string, o: ConnectRedisOptions, logger: ResolvedLogger)
   const waitMs = o.waitMs ?? DEFAULT_CONNECT_WAIT_MS;
   const client = createClient({ ...(o.clientOptions ?? {}), url }) as unknown as AnyRedisClient;
 
-  // A reconnecting client emits "error" on every attempt: log transitions only
+  // A reconnecting client emits "error" on every attempt: log transitions only. "again" only for a
+  // reconnection - the first connection after a slow start is not one (7-14)
   let healthy = false;
   let warned = false;
+  let connectedBefore = false;
   client.on("ready", () => {
-    if (warned && !healthy) logger.info(`${label}: connected to ${redact(url)} again`);
+    if (warned && !healthy) logger.info(`${label}: connected to ${redact(url)}${connectedBefore ? " again" : ""}`);
     healthy = true;
+    connectedBefore = true;
   });
   client.on("error", (err: unknown) => {
     if (healthy || !warned) {

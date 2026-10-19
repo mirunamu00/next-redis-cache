@@ -1,13 +1,14 @@
 {
   "name": "@mirunamu/next-redis-cache",
   "version": "2.0.1",
-  "description": "Redis cache handlers for Next.js 16 (legacy cacheHandler and \"use cache\" cacheHandlers) with build-output fallback, circuit breaker and old-build cleanup",
+  "description": "Redis cache handler for Next.js 16 that shares ISR, route handler, fetch and \"use cache\" entries and tag invalidations across instances (Kubernetes, self-hosted), with build-output fallback and a circuit breaker for Redis outages",
   "license": "MIT",
   "author": "mirunamu00",
   "keywords": [
     "next",
     "nextjs",
     "next.js",
+    "next-16",
     "redis",
     "cache",
     "cache-handler",
@@ -16,7 +17,10 @@
     "use-cache",
     "isr",
     "incremental-static-regeneration",
+    "shared-cache",
+    "multi-instance",
     "self-hosted",
+    "kubernetes",
     "app-router"
   ],
   "repository": {

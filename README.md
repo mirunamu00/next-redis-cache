@@ -3,10 +3,30 @@
 [![npm version](https://img.shields.io/npm/v/@mirunamu/next-redis-cache.svg)](https://www.npmjs.com/package/@mirunamu/next-redis-cache)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](https://opensource.org/licenses/MIT)
 [![Next.js](https://img.shields.io/badge/Next.js-16-black)](https://nextjs.org)
+[![CI](https://github.com/mirunamu00/next-redis-cache/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/mirunamu00/next-redis-cache/actions/workflows/ci.yml?query=branch%3Amaster)
+[![Nightly](https://github.com/mirunamu00/next-redis-cache/actions/workflows/nightly.yml/badge.svg?branch=master)](https://github.com/mirunamu00/next-redis-cache/actions/workflows/nightly.yml?query=branch%3Amaster)
 
-**Redis cache handlers for Next.js 16** - the legacy `cacheHandler` (ISR pages, route handlers, fetch cache) and the `"use cache"` `cacheHandlers`, sharing one Redis and one tag state across every instance.
+**Redis cache handler for Next.js 16** - one package for both cache interfaces: the `cacheHandler` (ISR pages, route handlers, fetch cache) and the `"use cache"` `cacheHandlers`. Every instance of a self-hosted app - Kubernetes pods, containers, several `next start` processes - reads the same entries from one Redis and sees the same tag invalidations.
 
-Upgrading from 1.x? Read [MIGRATION.md](https://github.com/mirunamu00/next-redis-cache/blob/master/MIGRATION.md).
+| | |
+| --- | --- |
+| Next.js | 16.1 and newer (`^16.1.0`; tested with 16.1 and 16.3). Next.js 15 is not supported by 2.x |
+| What it caches | ISR and prerendered pages, route handlers and the fetch cache (`cacheHandler`); `"use cache"` functions and components (`cacheHandlers`) |
+| Invalidation | `revalidateTag`, `updateTag` and `revalidatePath` reach every instance through one shared tag state |
+| When Redis fails | prerendered pages are served from the build output; every Redis command has a timeout and a circuit breaker - see [When Redis is unavailable](#when-redis-is-unavailable) |
+| Deployments | entries are separated per build, rolling updates and rollbacks are supported, old builds are cleaned up |
+| Tested with | Redis 7.2 and 8.4, Node.js 22 and 24, end-to-end with two instances, 15 chaos scenarios - see [Testing and verification](#testing-and-verification) |
+
+Upgrading from 1.x? Read [MIGRATION.md](https://github.com/mirunamu00/next-redis-cache/blob/master/MIGRATION.md). Deploying to Kubernetes? Read the [multi-instance deployment guide](https://github.com/mirunamu00/next-redis-cache/blob/master/docs/kubernetes.md).
+
+## Why this package?
+
+By default, every Next.js server keeps its own cache: entries in memory and in `.next/cache` on its own disk, `"use cache"` entries in memory. The Next.js documentation [points this out for self-hosting](https://nextjs.org/docs/app/guides/self-hosting#caching-and-isr): with several instances, each one has its own copy. In practice that means:
+
+- every instance renders and stores the same page on its own, and a new pod starts with an empty cache;
+- `revalidateTag()`, `updateTag()` or `revalidatePath()` only reach the instance that handled the request, so other instances keep serving the old content.
+
+This package replaces both caches with handlers that store entries in Redis and record invalidations in one shared tag state, following Next's own rules for when an entry is fresh, stale or expired. A single `next start` process with a persistent disk does not need it.
 
 ## Highlights
 
@@ -97,6 +117,20 @@ export async function register() {
 
 That is all. During `next build` the handlers are no-ops (nothing connects), and in `next dev` there is no build-output fallback.
 
+## Multi-instance deployment (Kubernetes)
+
+```mermaid
+flowchart LR
+  LB[Load balancer / Service] --> A[Next.js pod 1]
+  LB --> B[Next.js pod 2]
+  LB --> C[Next.js pod N]
+  A & B & C -- "entries {namespace}:{buildId}:*" --> R[(Redis)]
+  A & B & C -- "invalidations {namespace}:_tagstate" --> R
+  A & B & C -. "Redis unavailable: read only" .-> O[.next/server/app<br/>build output in the image]
+```
+
+Build the app once and run the same image in every pod, so that every pod has the same build id: entries are shared between the pods of one build, and invalidations between all pods. The [deployment guide](https://github.com/mirunamu00/next-redis-cache/blob/master/docs/kubernetes.md) covers build ids, environment variables, rolling updates and rollbacks, Redis settings and the limits during a Redis outage.
+
 ## How it works
 
 ### Keys
@@ -138,6 +172,20 @@ Prewarming is therefore optional: every page is served from the build output on 
 The package never calls `client.connect()` itself and sends nothing while `client.isReady` is false - no command is parked in the client's offline queue and replayed after a reconnect. `connectRedis()` waits at most `waitMs` (1 s) for the first connection, keeps reconnecting in the background and shares one client per URL in the process.
 
 Every command is bounded by `timeouts.readMs` (1000) or `timeouts.writeMs` (2000). A timeout opens the circuit breaker for `circuitBreaker.openMs` (10 s): meanwhile every call is answered without Redis at once (misses, build-output fallback), then Redis is tried again. Command errors such as `WRONGTYPE` or `OOM` do not open the circuit.
+
+### When Redis is unavailable
+
+Unreachable, unresponsive, refusing the password or not configured at all - the app keeps answering, with these consequences:
+
+| What | Behavior while Redis is unavailable |
+| --- | --- |
+| Prerendered pages and route handlers | Served from the build output (`.next/server/app`), in the version of the build |
+| Pages regenerated after the build (ISR), other legacy entries | A miss: Next renders them for each request |
+| `"use cache"` entries | A miss: the function runs for each request |
+| `revalidateTag()`, `updateTag()`, `revalidatePath()` | Not recorded: logged as a failure and not retried, so other instances never see that invalidation |
+| Request latency | At most one `readMs` per round trip until the first timeout opens the circuit, then no wait while it is open |
+
+When Redis is usable again, reads go back to Redis and build-output pages are written back. The circuit only reacts to timeouts; a lost connection is detected by the client (`isReady`), so nothing waits for it.
 
 ### TTLs and memory
 
@@ -254,6 +302,29 @@ export async function getCatalog() {
 ```
 
 The entry is stored until `expire` (1 day); after `revalidate` (1 hour) it is returned and regenerated in the background.
+
+## Testing and verification
+
+Every layer below exists in this repository and runs in GitHub Actions; the badges at the top show the latest result on `master`. A release is published only from a commit that passed the full CI matrix and the chaos subset ([release.yml](https://github.com/mirunamu00/next-redis-cache/blob/master/.github/workflows/release.yml)), with npm provenance.
+
+| Layer | What it checks | When |
+| --- | --- | --- |
+| Unit and property | keys, entry format, TTLs, tag checks against Next's rules, circuit breaker, logging (Node.js 22, 24 and Windows) | every push and PR |
+| Integration | command semantics against real Redis 7.2 and 8.4, with `@redis/client` 5 and 6 | every push and PR |
+| Fault injection | Redis before connect, disconnected, reconnecting, unresponsive, slow, resetting connections | every push and PR |
+| Contract | type compatibility with Next.js 16.1 and 16.3 (and canary nightly); the `"use cache"` handler is compared with Next's default handler on generated operation sequences; the code blocks of this README are type-checked | every push and PR |
+| End-to-end | three test apps on two instances sharing one Redis: HTML, RSC, segment prefetch, invalidation across instances | PR: Next.js 16.3 x Redis 8.4; nightly: 16.1 and 16.3 x Redis 7.2 and 8.4 |
+| Chaos | C1-C15: Redis absent at startup, killed, unresponsive, slow, flushed, evicted, restarted, wrong password, wrong key type, rolling update, rollback, invalidation during a render, clock skew between instances | nightly; a subset before every release |
+| Performance | Redis commands per request and memory of one build against a committed baseline | every push and PR |
+| Coverage and mutation | merged coverage thresholds; mutation score of at least 70 % | coverage on every push and PR, mutation weekly |
+
+Measured results recorded in the repository (conditions in [tests/perf](https://github.com/mirunamu00/next-redis-cache/blob/master/tests/perf/README.md)):
+
+- A cache hit of a page costs 2 Redis commands (`GET` of the entry, `HMGET` of its tags).
+- One build of the static-site test app (176 entries) takes 17.4 MB in Redis with brotli, against 149.5 MB with 1.1.0.
+- The weekly mutation score in CI was 84.78 % on 2026-09-29.
+
+Every layer can be run locally (`npm test`, `npm run test:int`, `npm run test:e2e`, ...); Docker is needed for Redis, toxiproxy and the end-to-end fleet.
 
 ## Security
 

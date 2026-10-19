@@ -1,5 +1,11 @@
 # @mirunamu/next-redis-cache
 
+## 2.0.2
+
+### Patch Changes
+
+- [`a15b2dc`](https://github.com/mirunamu00/next-redis-cache/commit/a15b2dca977de275661ff3b2497709acddf10bf7) Thanks [@geonwooo-park](https://github.com/geonwooo-park)! - Docs: README introduction (supported versions, why a shared cache, behavior when Redis is unavailable, testing and verification), a multi-instance and Kubernetes deployment guide, and a clearer npm description and keywords. No code changes.
+
 ## 2.0.1
 
 ### Patch Changes

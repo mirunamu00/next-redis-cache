@@ -1,5 +1,11 @@
 # @mirunamu/next-redis-cache
 
+## 2.0.1
+
+### Patch Changes
+
+- [`4964f53`](https://github.com/mirunamu00/next-redis-cache/commit/4964f534098ea0c704ad3cddd7553f6c881fc8c2) Thanks [@geonwooo-park](https://github.com/geonwooo-park)! - Add npm keywords so the package shows up in npm search for Next.js, Redis, and cache handler queries.
+
 ## 2.0.0
 
 ### Major Changes

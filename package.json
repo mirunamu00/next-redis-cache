@@ -4,6 +4,21 @@
   "description": "Redis cache handlers for Next.js 16 (legacy cacheHandler and \"use cache\" cacheHandlers) with build-output fallback, circuit breaker and old-build cleanup",
   "license": "MIT",
   "author": "mirunamu00",
+  "keywords": [
+    "next",
+    "nextjs",
+    "next.js",
+    "redis",
+    "cache",
+    "cache-handler",
+    "cacheHandler",
+    "cacheHandlers",
+    "use-cache",
+    "isr",
+    "incremental-static-regeneration",
+    "self-hosted",
+    "app-router"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/mirunamu00/next-redis-cache.git"
